@@ -18,5 +18,5 @@ python -c "import torch; print('torch %s' % torch.__version__)"
 if [[ "$COVERAGE" == "true" ]]; then
     nosetests -s --with-coverage pthbldr
 else
-    nosetests -s dagbldr
+    nosetests -s pthbldr
 fi
