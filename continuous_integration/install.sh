@@ -36,13 +36,13 @@ ls -l
 echo
 if [[ ! -f miniconda.sh ]]
     then
-    wget http://repo.continuum.io/miniconda/Miniconda-3.6.0-Linux-x86_64.sh \
+    wget https://repo.continuum.io/miniconda/Miniconda2-4.3.11-Linux-x86_64.sh \
         -O miniconda.sh
     fi
 chmod +x miniconda.sh && ./miniconda.sh -b
 cd ..
 echo $(ls /home/travis/m*)
-export PATH=/home/travis/miniconda/bin:$PATH
+export PATH=/home/travis/miniconda2/bin:$PATH
 conda update --yes conda
 popd
 
@@ -50,7 +50,7 @@ conda create -n testenv --yes python=$PYTHON_VERSION pip nose \
     numpy=$NUMPY_VERSION scipy=$SCIPY_VERSION
 source activate testenv
 #conda install pytorch torchvision cuda80 -c soumith
-conda install pytorch torchvision -c soumith
+conda install --yes pytorch torchvision -c soumith
 
 
 if [[ "$INSTALL_MKL" == "true" ]]; then
