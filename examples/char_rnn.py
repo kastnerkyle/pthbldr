@@ -191,7 +191,7 @@ def evaluate(prime_str='A', predict_len=100, temperature=0.8):
         raise ValueError("Training was not finalized, no file found at {}. Run with -m 1 first to train a model".format(final_param_path))
 
     model.minibatch_size = 1
-    hidden = Variable(model.create_hidden())
+    hidden = Variable(model.create_hidden(), volatile=True)
 
     if use_cuda:
         hidden = hidden.cuda()
