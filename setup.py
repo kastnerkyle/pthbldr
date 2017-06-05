@@ -12,6 +12,9 @@ setuptools.setup(
         os.path.abspath(__file__)), 'README.rst')).read(),
     license='BSD 3-clause',
     url='http://github.com/kastnerkyle/pthbldr/',
+    package_data={
+        'pthbldr': ['datasets/data/*']
+    },
     install_requires=['numpy',
                       'scipy',
                       'torch'],
