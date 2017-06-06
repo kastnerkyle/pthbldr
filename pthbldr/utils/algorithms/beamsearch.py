@@ -9,6 +9,7 @@ from multiprocessing import Pool
 import functools
 import time
 from ...core import get_logger
+import cPickle
 
 logger = get_logger()
 
@@ -351,28 +352,34 @@ def beamsearch(probabilities_function, beam_width=10, clip_len=-1,
     "beam_timeout" None or float time in seconds to wait for beam completion
     """
     start_time = time.time()
-
-    # may need a way to run for debugging...
-    b = inner_beamsearch(probabilities_function, beam_width=beam_width,
-                         clip_len=clip_len, start_token=start_token,
-                         end_token=end_token, use_log=use_log,
-                         renormalize=renormalize, length_score=length_score,
-                         stochastic=stochastic, temperature=temperature,
-                         random_state=random_state, eps=eps, verbose=verbose)
-    pool = Pool(1)
-    # don't do verbose inner loop
-    ex = functools.partial(run_beamsearch, probabilities_function, beam_width,
-                           clip_len, start_token, end_token, use_log,
-                           renormalize, length_score, stochastic, temperature,
-                           random_state, eps, False)
-    if beam_timeout == None:
-        beam_timeout = 10000000000000000000
-    abortable_ex = functools.partial(abortable_worker, ex, timeout=beam_timeout)
-    # only 1 job
-    all_results = pool.map(abortable_ex, [1])
-    pool.close()
-    pool.join()
-    all_results = all_results[0]
+    # support timeouts but also have failover
+    try:
+        pool = Pool(1)
+        # don't do verbose inner loop
+        ex = functools.partial(run_beamsearch, probabilities_function, beam_width,
+                               clip_len, start_token, end_token, use_log,
+                               renormalize, length_score, stochastic, temperature,
+                               random_state, eps, False)
+        if beam_timeout == None:
+            use_beam_timeout = 10000000000000000000
+        else:
+            use_beam_timeout = beam_timeout
+        abortable_ex = functools.partial(abortable_worker, ex, timeout=use_beam_timeout)
+        # only 1 job - used for timing out things
+        all_results = pool.map(abortable_ex, [1])
+        pool.close()
+        pool.join()
+        all_results = all_results[0]
+    except cPickle.PicklingError:
+        if beam_timeout != None:
+            raise ValueError("Unable to use beam_timeout - probabilities_function should be globally importable to work with multiprocessing for timeouts")
+        b = inner_beamsearch(probabilities_function, beam_width=beam_width,
+                             clip_len=clip_len, start_token=start_token,
+                             end_token=end_token, use_log=use_log,
+                             renormalize=renormalize, length_score=length_score,
+                             stochastic=stochastic, temperature=temperature,
+                             random_state=random_state, eps=eps, verbose=verbose)
+        all_results = b
     end_time = time.time()
 
     # beamsearch was killed due to time

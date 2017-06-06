@@ -1,3 +1,5 @@
+from nose.tools import assert_raises
+
 import numpy as np
 from pthbldr.utils import minibatch_kmedians
 from pthbldr.utils import beamsearch
@@ -56,73 +58,87 @@ def prob_func(prefix):
 
 
 def test_beamsearch():
-    stochastic = True
-    for stochastic in True, False:
-        random_state = np.random.RandomState(2177)
+    beam_width = 5
+    n_letters = 50
+    random_state = np.random.RandomState(2177)
+    for stochastic in (True, False):
         start_token = ord("t")
         end_token = ord("e")
-        beam_width = 5
-        n_letters = 50
         b = beamsearch(prob_func, beam_width, start_token=start_token,
                        end_token=end_token,
                        clip_len=n_letters,
                        stochastic=stochastic,
                        random_state=random_state)
-        # fetch off the generator
+        # Map to chars
         all_r = []
         for r in b:
             char_r0 = "".join([chr(c) for c in r[0]])
             all_r.append((char_r0, r[1], r[2]))
-        # order from worst (0) to best (-1)
-        all_r = sorted(all_r, key=lambda x: x[1])
+        # ordered from best (0) to worst
+        assert all_r[0][1] > all_r[1][1]
 
-        if stochastic:
-            assert all_r[-1][0] == 'the'
-        else:
-            assert all_r[-1][0] == 'the'
-
-        random_state = np.random.RandomState(2177)
         start_token = ord("t")
         end_token = [ord("a"), ord("s")]
-        beam_width = 5
-        n_letters = 50
         b = beamsearch(prob_func, beam_width, start_token=start_token,
                        end_token=end_token,
                        clip_len=n_letters,
                        stochastic=stochastic,
                        random_state=random_state)
-        # fetch off the generator
+        # Map to chars
         all_r = []
         for r in b:
             char_r0 = "".join([chr(c) for c in r[0]])
             all_r.append((char_r0, r[1], r[2]))
-        # order from worst (0) to best (-1)
-        all_r = sorted(all_r, key=lambda x: x[1])
+        # ordered from best (0) to worst
+        assert all_r[0][1] > all_r[1][1]
 
-        if stochastic:
-            assert all_r[-1][0] == "thowe wenthe corse w fat farsthent fas"
-        else:
-            assert all_r[-1][0] == "t fas"
-
-        random_state = np.random.RandomState(2177)
         start_token = ord("t")
         end_token = [ord("c"), ord("a"), None]
-        beam_width = 5
-        n_letters = 50
         b = beamsearch(prob_func, beam_width, start_token=start_token,
                        end_token=end_token,
                        clip_len=n_letters,
                        stochastic=stochastic,
                        random_state=random_state)
-        # fetch off the generator
+        # Map to chars
         all_r = []
         for r in b:
             char_r0 = "".join([chr(c) for c in r[0]])
             all_r.append((char_r0, r[1], r[2]))
-        # order from worst (0) to best (-1)
-        all_r = sorted(all_r, key=lambda x: x[1])
+        # ordered from best (0) to worst
+        assert all_r[0][1] > all_r[1][1]
 
-        if stochastic:
-            assert all_r[-1][0] == "thenthathowent went henthasent w he we went wenthar"
-        else:
-            assert all_r[-1][0] == "t went went went went went went went went went went"
+        # test that it still works with non-global (won't use multiprocessing)
+        def inner_prob_func(prefix):
+            history = prefix[-1]
+            k = history
+            dist_lookup = pseudo_lm[k]
+            # list of prob, key pairs back
+            dist = [(v, k) for k, v in dist_lookup.items()]
+            return dist
+
+        start_token = ord("t")
+        end_token = [ord("c"), ord("a"), None]
+        b = beamsearch(inner_prob_func, beam_width, start_token=start_token,
+                       end_token=end_token,
+                       clip_len=n_letters,
+                       stochastic=stochastic,
+                       random_state=random_state)
+        # Map to chars
+        all_r = []
+        for r in b:
+            char_r0 = "".join([chr(c) for c in r[0]])
+            all_r.append((char_r0, r[1], r[2]))
+        # ordered from best (0) to worst
+        assert all_r[0][1] > all_r[1][1]
+
+        def fail():
+            # be sure that non-importable function and a timeout raises errors
+            start_token = ord("t")
+            end_token = [ord("c"), ord("a"), None]
+            b = beamsearch(inner_prob_func, beam_width, start_token=start_token,
+                           end_token=end_token,
+                           clip_len=n_letters,
+                           beam_timeout=5,
+                           stochastic=stochastic,
+                           random_state=random_state)
+        assert_raises(ValueError, fail)
