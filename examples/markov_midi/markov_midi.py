@@ -32,18 +32,19 @@ lp = mu["list_of_data_pitch"]
 ld = mu["list_of_data_duration"]
 lql = mu["list_of_data_quarter_length"]
 
-pitch_clusters = 8192
-dur_clusters = 2048
-minibatch_size = 10
+pitch_clusters = 32000
+dur_clusters = 10000
+minibatch_size = 100
 n_iter = 0
 voice_type = "woodwinds"
 #key = None
 subset = None
-key = None
+key = "minor"
 #subset = 100
 train_cache = True
 from_scratch = False
-joint_order = 12
+joint_order = 7
+default_quarter_length = 55
 # random-ish ext to check for plagiarism
 ext = 3 * joint_order + joint_order - 1
 
@@ -71,8 +72,8 @@ if key != None:
     lql = copy.deepcopy(keep_lql)
 
 
-# 100 potential seeds, reused from train...
-si = max((0., 1. - 100. / len(lp)))
+# 100+ potential seeds, reused from train...
+si = max((0., .9 - 100. / len(lp)))
 
 train_itr = list_of_array_iterator([lp, ld], minibatch_size,
                                    list_of_extra_info=[lql],
@@ -83,6 +84,13 @@ valid_itr = list_of_array_iterator([lp, ld], minibatch_size,
                                    list_of_extra_info=[lql],
                                    start_index=si,
                                    randomize=True, random_state=random_state)
+
+# make sure there is at least 1 minibatch worth!
+try:
+    next(valid_itr)
+    valid_itr.reset()
+except StopIteration:
+    raise ValueError("Need to increase number of seeds!")
 
 r = next(train_itr)
 pitch_mb, pitch_mask, dur_mb, dur_mask = r[:4]
@@ -325,6 +333,7 @@ if train_cache:
     print("Using train cache...")
     p_total_frequency = np.load("pitch_cache.npy").item()
     d_total_frequency = np.load("dur_cache.npy").item()
+    print("Finished loading train cache...")
 else:
     p_total_frequency = {}
     d_total_frequency = {}
@@ -402,6 +411,7 @@ for a in valid_itr:
                                          save_dir="samples/samples",
                                          name_tag="test_sample_{}.mid",
                                          #list_of_quarter_length=[int(.5 * qpm) for qpm in qpms],
+                                         default_quarter_length=default_quarter_length,
                                          voice_params=voice_type,
                                          add_to_name=i * pitch_mb.shape[1])
     i += 1
@@ -418,6 +428,7 @@ for a in valid_itr:
                                          save_dir="samples/samples",
                                          name_tag="test_quantized_sample_{}.mid",
                                          #list_of_quarter_length=[int(.5 * qpm) for qpm in qpms],
+                                         default_quarter_length=default_quarter_length,
                                          voice_params=voice_type,
                                          add_to_name=i * pitch_mb.shape[1])
     i += 1
@@ -430,26 +441,25 @@ for a in valid_itr:
     n_pitch_mb, n_pitch_mask, n_dur_mb, n_dur_mask = a[:4]
 
     q_pitch_mb, q_pitch_code_mb = pre_p(n_pitch_mb)
-    o_q_pitch_mb = q_pitch_mb
+    o_q_pitch_mb = copy.deepcopy(q_pitch_mb)
 
     q_dur_mb, q_dur_code_mb = pre_d(n_dur_mb)
-    o_q_dur_mb = q_dur_mb
+    o_q_dur_mb = copy.deepcopy(q_dur_mb)
 
     qpms = r[-1]
 
-    final_pitches = []
-    final_durs = []
-
     failed = []
+    final_beams = []
     for mbi in range(minibatch_size):
         start_pitch_token = [int(qp) for qp in list(q_pitch_code_mb[:joint_order, mbi, 0])]
         start_dur_token = [int(dp) for dp in list(q_dur_code_mb[:joint_order, mbi, 0])]
         start_token = [tuple([qp, dp]) for qp, dp in zip(start_pitch_token, start_dur_token)]
-        # eos
+        # eos for pitch, don't care what dur
         end_token = [(0, None)]
-        stochastic = True
-        beam_width = 50
-        clip = 100
+        stochastic = False
+        diversity_score = "set"
+        beam_width = 15
+        clip = 60
         timeout = 10
         verbose = True
         random_state = np.random.RandomState(90210)
@@ -457,101 +467,144 @@ for a in valid_itr:
                        start_token=start_token,
                        end_token=end_token,
                        clip_len=clip,
+                       diversity_score=diversity_score,
                        stochastic=stochastic,
                        random_state=random_state,
                        verbose=verbose,
                        beam_timeout=timeout)
 
         if len(b) > 0:
-            # for all beams, take the sequence (p[0]) and the respective type (ip[0] for pitch, ip[1] for dur)
-            # last number (4) for reconstruction to actual data (4 voices)
-            quantized_pitch_seqs = codebook_lookup([np.array([ip[0] for ip in p[0]]).astype("int32") for p in b], pitch_codebook, 4)
-            quantized_dur_seqs = codebook_lookup([np.array([ip[1] for ip in p[0]]).astype("int32") for p in b], dur_codebook, 4)
-
-            # take top beams
-            final_pitches.append(quantized_pitch_seqs[0])
-            final_durs.append(quantized_dur_seqs[0])
+            final_beams.append(b)
         else:
+            final_beams.append(b)
+            failed.append(mbi)
+            print("Sequence {} failed beamsearch timeout".format(mbi))
+            """
             failed.append(i * q_pitch_mb.shape[1] + mbi)
             print("Sequence {} failed beamsearch timeout".format(mbi))
             final_pitches.append(q_pitch_mb[:joint_order + 1, mbi])
             final_durs.append(q_dur_mb[:joint_order + 1, mbi])
+            """
 
-    # make into a minibatch
-    pad_size = max([len(fp) for fp in final_pitches])
-    new_qps = np.zeros((pad_size, len(final_pitches), final_pitches[0].shape[1])).astype("float32")
-    for n, fp in enumerate(final_pitches):
-        new_qps[:len(fp), n] = fp
+    for ni in range(len(final_beams)):
+        final_pitches = []
+        final_durs = []
 
-    pad_size = max([len(fd) for fd in final_durs])
-    new_qds = np.zeros((pad_size, len(final_durs), final_durs[0].shape[1])).astype("float32")
-    for n, fd in enumerate(final_durs):
-        new_qds[:len(fd), n] = fd
+        if ni in failed:
+            """
+            # delete all failures here
+            all_files = [fi for fi in os.listdir("samples/samples") if fi.endswith(".mid")]
+            remove_files = []
+            for failed_i in failed:
+                to_remove = ["samples/samples/" + fi for fi in all_files if "sample_{}.mid".format(failed_i) in fi]
+                remove_files.extend(to_remove)
 
-    q_pitch_mb = new_qps
-    q_dur_mb = new_qds
+            remove_files = sorted(list(set(remove_files)))
+            for rf in remove_files:
+                print("Removing copycat {}".format(rf))
+                os.remove(rf)
+            """
+            # delete here?
+            continue
 
-    min_len = min([q_pitch_mb.shape[0], q_dur_mb.shape[0]])
-    q_pitch_mb = q_pitch_mb[:min_len]
-    q_dur_mb = q_dur_mb[:min_len]
+        b = final_beams[ni]
+        # for all beams, take the sequence (p[0]) and the respective type (ip[0] for pitch, ip[1] for dur)
+        # last number (4) for reconstruction to actual data (used 4 voices)
 
-    pitch_where = []
-    duration_where = []
-    pl = mu['pitch_list']
-    dl = mu['duration_list']
+        # top 5 beams, :5
+        quantized_pitch_seqs = codebook_lookup([np.array([ip[0] for ip in p[0]]).astype("int32") for p in b[:5]], pitch_codebook, 4)
+        quantized_dur_seqs = codebook_lookup([np.array([ip[1] for ip in p[0]]).astype("int32") for p in b[:5]], dur_codebook, 4)
 
-    for n, pli in enumerate(pl):
-        pitch_where.append(np.where(q_pitch_mb == n))
+        # rerank top 5 by length
+        quantized_pitch_seqs = list(sorted(quantized_pitch_seqs, key=lambda x: len(x)))[::-1]
+        quantized_dur_seqs = list(sorted(quantized_dur_seqs, key=lambda x: len(x)))[::-1]
 
-    for n, dli in enumerate(dl):
-        duration_where.append(np.where(q_dur_mb == n))
+        final_pitches.extend(quantized_pitch_seqs)
+        final_durs.extend(quantized_dur_seqs)
 
-    for n, pw in enumerate(pitch_where):
-        q_pitch_mb[pw] = pl[n]
+        # make into a minibatch
+        pad_size = max([len(fp) for fp in final_pitches])
+        new_qps = np.zeros((pad_size, len(final_pitches), final_pitches[0].shape[1])).astype("float32")
+        for n, fp in enumerate(final_pitches):
+            new_qps[:len(fp), n] = fp
 
-    for n, dw in enumerate(duration_where):
-        q_dur_mb[dw] = dl[n]
+        pad_size = max([len(fd) for fd in final_durs])
+        new_qds = np.zeros((pad_size, len(final_durs), final_durs[0].shape[1])).astype("float32")
+        for n, fd in enumerate(final_durs):
+            new_qds[:len(fd), n] = fd
 
-    # ext in order to avoid influence of "priming"
-    q_pitch_mb = q_pitch_mb[ext:]
-    q_dur_mb = q_dur_mb[ext:]
+        q_pitch_mb = new_qps
+        q_dur_mb = new_qds
 
-    o_q_pitch_mb = o_q_pitch_mb[ext:]
-    o_q_dur_mb = o_q_dur_mb[ext:]
+        min_len = min([q_pitch_mb.shape[0], q_dur_mb.shape[0]])
+        q_pitch_mb = q_pitch_mb[:min_len]
+        q_dur_mb = q_dur_mb[:min_len]
 
-    final_q_pitch_mb = 0. * q_pitch_mb
-    final_q_dur_mb = 0. * q_dur_mb
-    leadin = 2 * joint_order
+        pitch_where = []
+        duration_where = []
+        pl = mu['pitch_list']
+        dl = mu['duration_list']
 
-    for mi in range(q_pitch_mb.shape[1]):
-        sz = np.prod(q_pitch_mb[:leadin, mi].shape)
-        matches = (o_q_pitch_mb[:leadin, mi] == q_pitch_mb[:leadin, mi]).sum()
-        if matches < (sz // 2):
-            final_q_pitch_mb[:, mi] = q_pitch_mb[:, mi]
-            final_q_dur_mb[:, mi] = q_dur_mb[:, mi]
-        else:
-            failed.append(i * q_pitch_mb.shape[1] + mi)
-            print("Sequence {} failed copycat check".format(mi))
+        for n, pli in enumerate(pl):
+            pitch_where.append(np.where(q_pitch_mb == n))
 
-    q_pitch_mb = final_q_pitch_mb
-    q_dur_mb = final_q_dur_mb
+        for n, dli in enumerate(dl):
+            duration_where.append(np.where(q_dur_mb == n))
 
-    pitches_and_durations_to_pretty_midi(q_pitch_mb, q_dur_mb,
-                                         save_dir="samples/samples",
-                                         name_tag="test_markov_sample_{}.mid",
-    #                                    list_of_quarter_length=qpms,
-                                         voice_params=voice_type,
-                                         add_to_name=i * q_pitch_mb.shape[1])
-    # delete all failures here
-    all_files = [fi for fi in os.listdir("samples/samples") if fi.endswith(".mid")]
-    remove_files = []
-    for failed_i in failed:
-        to_remove = ["samples/samples/" + fi for fi in all_files if "sample_{}.mid".format(failed_i) in fi]
-        remove_files.extend(to_remove)
+        for n, pw in enumerate(pitch_where):
+            q_pitch_mb[pw] = pl[n]
 
-    remove_files = sorted(list(set(remove_files)))
-    for rf in remove_files:
-        print("Removing copycat {}".format(rf))
-        os.remove(rf)
+        for n, dw in enumerate(duration_where):
+            q_dur_mb[dw] = dl[n]
 
-    i += 1
+        # ext in order to avoid influence of "priming"
+        q_pitch_mb = q_pitch_mb[ext:]
+        q_dur_mb = q_dur_mb[ext:]
+        if q_pitch_mb.shape[0] == 0:
+            continue
+        if q_dur_mb.shape[0] == 0:
+            continue
+
+        f_q_pitch_mb = o_q_pitch_mb[ext:]
+        f_q_dur_mb = o_q_dur_mb[ext:]
+        if f_q_pitch_mb.shape[0] == 0:
+            continue
+        if f_q_dur_mb.shape[0] == 0:
+            continue
+
+        final_q_pitch_mb = 0. * q_pitch_mb
+        final_q_dur_mb = 0. * q_dur_mb
+        leadin = 2 * joint_order
+
+        copycats = []
+        for mi in range(q_pitch_mb.shape[1]):
+            # if any beam fails zero it out
+            sz = np.prod(q_pitch_mb[:leadin, mi].shape)
+            # ni here because multiple beams are comparing to one element
+            matches = (f_q_pitch_mb[:leadin, ni] == q_pitch_mb[:leadin, mi]).sum()
+
+            if matches < (sz // 2):
+                final_q_pitch_mb[:, mi] = q_pitch_mb[:, mi]
+                final_q_dur_mb[:, mi] = q_dur_mb[:, mi]
+            else:
+                final_q_pitch_mb[:, mi] = 0. * q_pitch_mb[:, mi]
+                final_q_dur_mb[:, mi] = 0. * q_dur_mb[:, mi]
+                copycats.append(mi)
+                print("Sequence {}:{} failed copycat check".format(ni, mi))
+
+        q_pitch_mb = final_q_pitch_mb
+        q_dur_mb = final_q_dur_mb
+
+        name_tag = "test_markov_sample_{}".format(ni) + "_{}.mid"
+        path = "samples/samples/"
+        pitches_and_durations_to_pretty_midi(q_pitch_mb, q_dur_mb,
+                                             save_dir=path,
+                                             name_tag=name_tag,
+        #                                    list_of_quarter_length=qpms,
+                                             voice_params=voice_type,
+                                             default_quarter_length=default_quarter_length)
+
+        for cc in copycats:
+            cc_file = path + name_tag.format(cc)
+            os.remove(cc_file)
+            print("Removed copycat file {}".format(cc_file))

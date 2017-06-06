@@ -94,40 +94,14 @@ class Beam(object):
 def inner_beamsearch(probabilities_function, beam_width=10, clip_len=-1,
                      start_token="<START>", end_token="<EOS>", use_log=True,
                      renormalize=True, length_score=True,
+                     diversity_score="set",
                      stochastic=False, temperature=1.0,
                      random_state=None, eps=1E-9, verbose=False):
     """
+    Based on code from
     From http://geekyisawesome.blogspot.ca/2017/04/getting-top-n-most-probable-sentences.html
 
-    returns a generator, which will yield beamsearched sequences in order of their probability
-
-    "probabilities_function" returns a list of (next_prob, next_word) pairs given a prefix.
-    this function should be in the outer scope of your python file, in order to work with multiprocessing
-
-    "beam_width" is the number of prefixes to keep (so that instead of keeping the top 10 prefixes you can keep the top 100 for example).
-    By making the beam search bigger you can get closer to the actual most probable sentence but it would also take longer to process.
-
-    "clip_len" is a maximum length to tolerate, beyond which the most probable prefix is returned as an incomplete sentence.
-    Without a maximum length, a faulty probabilities function which does not return a highly probable end token
-    will lead to an infinite loop or excessively long garbage sentences.
-
-    "start_token" can be a single string (token), or a sequence of tokens
-
-    "end_token" is a single string (token), or a sequence of tokens that signifies end of the sequence. If token is a list of tuple, can set elements of last tuple to None for partial matching
-
-    "use_log, renormalize, length_score" are all related to calculation of beams to keep
-    and should improve results when True
-
-    "stochastic" uses a different sampling algorithm for reducing/aggregating beams
-    it should result in more diverse and interesting outputs
-
-    "temperature" is the softmax temperature for the underlying stochastic
-    beamsearch - the default of 1.0 is usually fine
-
-    "random_state" is a np.random.RandomState() object, passed when using the
-    stochastic beamsearch in order to control randomness
-
-    "eps" minimum probability for log-space calculations, to avoid numerical issues
+    This is the core algorithm, do not use directly.
     """
     if stochastic:
         if random_state is None:
@@ -204,8 +178,32 @@ def inner_beamsearch(probabilities_function, beam_width=10, clip_len=-1,
             else:
                 min_prob = 1.
 
+        use_diversity_score = False
+        if diversity_score == "set":
+            use_diversity_score = True
+            pre = [r[-1][len(start_token):] for r in prev_beam]
+            base = set(pre[0])
+            diversity_scores = []
+            # score for first entry
+            if use_log:
+               diversity_scores.append(0.)
+            else:
+               diversity_scores.append(1.)
+            if len(pre) > 1:
+                for pre_i in pre[1:]:
+                    s = set(pre_i)
+                    union = base | s
+                    # number of new things + (- number of repetitions)
+                    sc = (len(union) - len(base)) - (len(pre_i) - len(s))
+                    # update it
+                    base = union
+                    if use_log:
+                        diversity_scores.append(sc)
+                    else:
+                        diversity_scores.append(np.exp(sc))
+
         # Add complete sentences that do not yet have the best probability to the current beam, the rest prepare to add more words to them.
-        for (complete, prefix_score, prefix_prob, prefix) in prev_beam:
+        for ni, (complete, prefix_score, prefix_prob, prefix) in enumerate(prev_beam):
             if complete == True:
                 curr_beam.add(True, prefix_score, prefix_prob, prefix)
             else:
@@ -223,12 +221,16 @@ def inner_beamsearch(probabilities_function, beam_width=10, clip_len=-1,
                             score = prefix_prob + np.log(n) + np.log(len(prefix)) - min_prob
                         else:
                             score = prefix_prob + np.log(n) - min_prob
+                        if use_diversity_score:
+                            score = score + diversity_scores[ni]
                         prob = prefix_prob + np.log(n)
                     else:
                         if length_score:
                             score = (prefix_prob * n * len(prefix)) / min_prob
                         else:
                             score = (prefix_prob * n) / min_prob
+                        if use_diversity_score:
+                            score = score + dicersity_scores[ni]
                         prob = prefix_prob * n
 
                     if end_token_is_seq:
@@ -295,13 +297,14 @@ def inner_beamsearch(probabilities_function, beam_width=10, clip_len=-1,
 
 def run_beamsearch(probabilities_function, beam_width, clip_len,
                     start_token, end_token, use_log,
-                    renormalize, length_score, stochastic, temperature,
+                    renormalize, length_score, diversity_score, stochastic, temperature,
                     random_state, eps, verbose, n):
     # n unused, just for pool usage
     b = inner_beamsearch(probabilities_function, beam_width=beam_width,
                          clip_len=clip_len, start_token=start_token,
                          end_token=end_token, use_log=use_log,
                          renormalize=renormalize, length_score=length_score,
+                         diversity_score=diversity_score,
                          stochastic=stochastic, temperature=temperature,
                          random_state=random_state, eps=eps, verbose=verbose)
     return b
@@ -310,6 +313,7 @@ def run_beamsearch(probabilities_function, beam_width, clip_len,
 def beamsearch(probabilities_function, beam_width=10, clip_len=-1,
                start_token="<START>", end_token="<EOS>", use_log=True,
                renormalize=True, length_score=True,
+               diversity_score="set",
                stochastic=False, temperature=1.0,
                random_state=None, eps=1E-9, verbose=False,
                beam_timeout=None):
@@ -333,8 +337,10 @@ def beamsearch(probabilities_function, beam_width=10, clip_len=-1,
 
     "end_token" is a single string (token), or a sequence of tokens that signifies end of the sequence. If token is a tuple, can set elements to None for partial matching
 
-    "use_log, renormalize, length_score" are all related to calculation of beams to keep
+    "use_log, renormalize, length_score, diversity_score" are all related to calculation of beams to keep
     and should improve results when True
+
+    diversity_score measures currently only support "set", or False
 
     "stochastic" uses a different sampling algorithm for reducing/aggregating beams
     it should result in more diverse and interesting outputs
@@ -353,12 +359,17 @@ def beamsearch(probabilities_function, beam_width=10, clip_len=-1,
     """
     start_time = time.time()
     # support timeouts but also have failover
+
+    if diversity_score not in ["set", False]:
+        raise ValueError("Unsupported argument for diversity_score")
+
     try:
         pool = Pool(1)
         # don't do verbose inner loop
         ex = functools.partial(run_beamsearch, probabilities_function, beam_width,
                                clip_len, start_token, end_token, use_log,
-                               renormalize, length_score, stochastic, temperature,
+                               renormalize, length_score, diversity_score,
+                               stochastic, temperature,
                                random_state, eps, False)
         if beam_timeout == None:
             use_beam_timeout = 10000000000000000000
@@ -377,6 +388,7 @@ def beamsearch(probabilities_function, beam_width=10, clip_len=-1,
                              clip_len=clip_len, start_token=start_token,
                              end_token=end_token, use_log=use_log,
                              renormalize=renormalize, length_score=length_score,
+                             diversity_score=diversity_score,
                              stochastic=stochastic, temperature=temperature,
                              random_state=random_state, eps=eps, verbose=verbose)
         all_results = b
