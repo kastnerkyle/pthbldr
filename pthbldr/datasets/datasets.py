@@ -145,8 +145,8 @@ def string_to_character_index(string):
 def get_dataset_dir(dataset_name, data_dir=None, folder=None, create_dir=True):
     """ Get dataset directory path """
     if not data_dir:
-        data_dir = os.getenv("DAGBLDR_DATA", os.path.join(
-            os.path.expanduser("~"), "dagbldr_data"))
+        data_dir = os.getenv("PTHBLDR_DATA", os.path.join(
+            os.path.expanduser("~"), "pthbldr_data"))
     if folder is None:
         data_dir = os.path.join(data_dir, dataset_name)
     else:
@@ -1834,7 +1834,7 @@ def fetch_symbtr_music21(keys=["C major", "A minor"], verbose=False):
 
 
 def check_fetch_bach_chorales_music21():
-    """ Move files into dagbldr dir, in case python is on nfs. """
+    """ Move files into pthbldr dir, in case python is on nfs. """
     from music21 import corpus
     all_bach_paths = corpus.getComposer("bach")
     partial_path = get_dataset_dir("bach_chorales_music21")
