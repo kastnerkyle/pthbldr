@@ -75,7 +75,7 @@ def test_beamsearch():
             char_r0 = "".join([chr(c) for c in r[0]])
             all_r.append((char_r0, r[1], r[2]))
         # ordered from best (0) to worst
-        assert all_r[0][1] > all_r[1][1]
+        assert all_r[0][1] >= all_r[1][1]
 
         start_token = ord("t")
         end_token = [ord("a"), ord("s")]
@@ -90,7 +90,7 @@ def test_beamsearch():
             char_r0 = "".join([chr(c) for c in r[0]])
             all_r.append((char_r0, r[1], r[2]))
         # ordered from best (0) to worst
-        assert all_r[0][1] > all_r[1][1]
+        assert all_r[0][1] >= all_r[1][1]
 
         start_token = ord("t")
         end_token = [ord("c"), ord("a"), None]
@@ -105,7 +105,7 @@ def test_beamsearch():
             char_r0 = "".join([chr(c) for c in r[0]])
             all_r.append((char_r0, r[1], r[2]))
         # ordered from best (0) to worst
-        assert all_r[0][1] > all_r[1][1]
+        assert all_r[0][1] >= all_r[1][1]
 
         # test that it still works with non-global (won't use multiprocessing)
         def inner_prob_func(prefix):
@@ -129,7 +129,7 @@ def test_beamsearch():
             char_r0 = "".join([chr(c) for c in r[0]])
             all_r.append((char_r0, r[1], r[2]))
         # ordered from best (0) to worst
-        assert all_r[0][1] > all_r[1][1]
+        assert all_r[0][1] >= all_r[1][1]
 
         def fail():
             # be sure that non-importable function and a timeout raises errors
