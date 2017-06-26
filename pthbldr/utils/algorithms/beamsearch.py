@@ -316,7 +316,8 @@ def beamsearch(probabilities_function, beam_width=10, clip_len=-1,
                diversity_score="set",
                stochastic=False, temperature=1.0,
                random_state=None, eps=1E-9, verbose=False,
-               beam_timeout=None):
+               beam_timeout=None,
+               debug=False):
     """
     If timeout is reached, returns an empty list (return current beams instead?)
 
@@ -340,7 +341,7 @@ def beamsearch(probabilities_function, beam_width=10, clip_len=-1,
     "use_log, renormalize, length_score, diversity_score" are all related to calculation of beams to keep
     and should improve results when True
 
-    diversity_score measures currently only support "set", or False
+    diversity_score measures currently only support "set", or None
 
     "stochastic" uses a different sampling algorithm for reducing/aggregating beams
     it should result in more diverse and interesting outputs
@@ -360,10 +361,12 @@ def beamsearch(probabilities_function, beam_width=10, clip_len=-1,
     start_time = time.time()
     # support timeouts but also have failover
 
-    if diversity_score not in ["set", False]:
+    if diversity_score not in ["set", None]:
         raise ValueError("Unsupported argument for diversity_score")
 
     try:
+        if debug:
+            raise cPickle.PicklingError()
         pool = Pool(1)
         # don't do verbose inner loop
         ex = functools.partial(run_beamsearch, probabilities_function, beam_width,
