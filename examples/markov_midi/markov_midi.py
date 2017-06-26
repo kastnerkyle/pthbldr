@@ -4,6 +4,7 @@ from scipy.cluster.vq import vq
 import os
 import cPickle as pickle
 import copy
+import collections
 
 from pthbldr.datasets import pitches_and_durations_to_pretty_midi
 from pthbldr.datasets import list_of_array_iterator
@@ -11,7 +12,6 @@ from pthbldr.datasets import fetch_bach_chorales_music21
 from pthbldr.utils import minibatch_kmedians, beamsearch
 
 #mu = fetch_lakh_midi_music21(subset="pop")
-mu = fetch_bach_chorales_music21()
 #mu = fetch_haralick_midi_music21(subset="mozart_piano")
 #mu = fetch_symbtr_music21()
 #mu = fetch_wikifonia_music21()
@@ -19,13 +19,10 @@ mu = fetch_bach_chorales_music21()
 #n_epochs = 500
 #n_epochs = 2350
 #n_epochs = 3000
-pitch_oh_size = len(mu["pitch_list"])
-dur_oh_size = len(mu["duration_list"])
 
+mu = fetch_bach_chorales_music21()
 order = mu["list_of_data_pitch"][0].shape[-1]
 
-n_pitches = len(mu["pitch_list"])
-n_dur = len(mu["duration_list"])
 random_state = np.random.RandomState(1999)
 
 lp = mu["list_of_data_pitch"]
@@ -34,7 +31,7 @@ lql = mu["list_of_data_quarter_length"]
 
 pitch_clusters = 32000
 dur_clusters = 10000
-minibatch_size = 100
+minibatch_size = 75
 n_iter = 0
 voice_type = "woodwinds"
 #key = None
@@ -45,6 +42,7 @@ train_cache = True
 from_scratch = False
 joint_order = 7
 default_quarter_length = 55
+hook_check = False
 # random-ish ext to check for plagiarism
 ext = 3 * joint_order + joint_order - 1
 
@@ -70,6 +68,62 @@ if key != None:
     lp = copy.deepcopy(keep_lp)
     ld = copy.deepcopy(keep_ld)
     lql = copy.deepcopy(keep_lql)
+
+def backfill(list_of_arr, empty=-1):
+    final = []
+    for arr in list_of_arr:
+        for ic in range(arr.shape[1]):
+            last = arr[arr[:, ic] != empty, ic][0]
+            for ir in range(arr.shape[0]):
+                if arr[ir, ic] == empty:
+                    arr[ir, ic] = last
+                else:
+                    last = arr[ir, ic]
+        # the first element must be defined for all 4!
+        is_gt = arr > 0.
+        all_true = np.prod(is_gt, axis=1)
+        try:
+            first_all = np.where(all_true > 0)[0][0]
+            final.append(arr[first_all:])
+        except:
+            arr = arr * 0. - 10000
+            final.append(arr[first_all:])
+    return final
+
+blp = backfill(lp)
+prune = [i for i in range(len(blp)) if (blp[i] < -1000).any()]
+lp = [lpi for i, lpi in enumerate(lp) if i not in prune]
+ld = [ldi for i, ldi in enumerate(ld) if i not in prune]
+lql = [lqli for i, lqli in enumerate(lql) if i not in prune]
+# now that it is pruned try again
+blp = backfill(lp)
+prune = [i for i in range(len(blp)) if (blp[i] < -1000).any()]
+assert len(prune) == 0
+
+llp = [lpi[:, 0] for lpi in blp]
+allowed_bottom_notes = np.unique(np.concatenate(llp, axis=0))
+all_blp = np.concatenate(blp, axis=0)
+
+vlp = [np.array((lpi[:, 1] - lpi[:, 0], lpi[:, 2] - lpi[:, 1], lpi[:, 3] - lpi[:, 2])).T for lpi in blp]
+
+vlps = np.concatenate(vlp, axis=0)
+dd1 = collections.Counter(vlps[:, 0].ravel())
+dd2 = collections.Counter(vlps[:, 1].ravel())
+dd3 = collections.Counter(vlps[:, 2].ravel())
+allowed_intervals1 = sorted([did[0] for did in dd1.most_common()[:36]])
+allowed_intervals2 = sorted([did[0] for did in dd2.most_common()[:36]])
+allowed_intervals3 = sorted([did[0] for did in dd3.most_common()[:36]])
+allowed_values = [allowed_bottom_notes, allowed_intervals1, allowed_intervals2, allowed_intervals3]
+
+dlp = [blpi[1:] - blpi[:-1] for blpi in blp]
+lp = [np.concatenate((lpi[0][None], dlpi), axis=0) for lpi, dlpi in zip(lp, dlp)]
+
+mu["pitch_list"] = [u for u in np.unique(np.concatenate(lp, axis=0))]
+
+n_dur = len(mu["duration_list"])
+n_pitches = len(mu["pitch_list"])
+pitch_oh_size = len(mu["pitch_list"])
+dur_oh_size = len(mu["duration_list"])
 
 
 # 100+ potential seeds, reused from train...
@@ -232,8 +286,8 @@ ld = fixup_dur_list(ld)
 lp = fixup_pitch_list(lp)
 
 if from_scratch or not os.path.exists("dur_codebook.npy"):
-    if subset != None or key != None:
-        raise ValueError("subset and key should be None when building the codebooks!")
+    #if subset != None or key != None:
+    #    raise ValueError("subset and key should be None when building the codebooks!")
     dur_codebook = get_codebook(ld, n_components=dur_clusters, n_iter=n_iter, oh_size=dur_oh_size)
     np.save("dur_codebook.npy", dur_codebook)
 else:
@@ -241,8 +295,8 @@ else:
 
 
 if from_scratch or not os.path.exists("pitch_codebook.npy"):
-    if subset != None or key != None:
-        raise ValueError("subset and key should be None when building the codebooks!")
+    #if subset != None or key != None:
+    #    raise ValueError("subset and key should be None when building the codebooks!")
     pitch_codebook = get_codebook(lp, n_components=pitch_clusters, n_iter=n_iter, oh_size=pitch_oh_size)
     np.save("pitch_codebook.npy", pitch_codebook)
 else:
@@ -355,35 +409,103 @@ else:
     np.save("dur_cache.npy", d_total_frequency)
 
 
-def rolloff_lookup(lookup_dict, lookup_key):
+def prune_invalid_keys(dist_lookup, prefix):
+    dlk = sorted(list(dist_lookup.keys()))
+    the_notes = codebook_lookup([[int(k) for k in dlk]], pitch_codebook, 4)[0]
+    the_prefix = codebook_lookup([prefix], pitch_codebook, 4)[0]
+    paths = [np.concatenate((the_prefix, notes[None]), axis=0) for notes in the_notes]
+    allowed_keys = []
+    for n, p in enumerate(paths):
+        up = np.array(unfixup_pitch_list(p))
+        up = np.cumsum(up, axis=0)
+        up_l = up[-1]
+        safe = True
+        if up_l[0] not in allowed_values[0]:
+            safe = False
+
+        up_vlp = up_l[1:] - up_l[:-1]
+        for i in range(len(up_vlp)):
+            if up_vlp[i] not in allowed_values[i + 1]:
+                safe = False
+        if safe:
+            allowed_keys.append(n)
+    if len(allowed_keys) > 0:
+        return {dlk[k]: dist_lookup[dlk[k]] for k in allowed_keys}
+    else:
+        return {}
+
+
+def rolloff_lookup(lookup_dict, lookup_key, full_prefix, hook=False):
     """ roll off lookups n, n-1, n-2, n-3, down to random choice at 0 """
     lk = lookup_key
     ld = lookup_dict
+    keylen = 0
     try:
         dist_lookup = lookup_dict[lk]
-        return dist_lookup
+        keylen = len(lk)
+        if hook:
+            dist_lookup = prune_invalid_keys(dist_lookup, full_prefix)
+            if len(dist_lookup.keys()) == 0:
+                # need to map the whole thing back from symbol -> notes
+                # then see if each and every interval is valid
+                # check it here
+                raise KeyError("nope.jpg")
     except KeyError:
+        found = False
         for oi in range(1, len(lookup_key) - 1):
             sub_keys = [ki for ki in lookup_dict.keys() if lk[oi:] == ki[oi:]]
             if len(sub_keys) > 0:
+               ii = 0
                random_state.shuffle(sub_keys)
                dist_lookup = lookup_dict[sub_keys[0]]
-               return dist_lookup
-    # failover case
-    sub_keys = sorted(list(set(lookup_key)))
-    dist_lookup = {sk: 1. / len(sub_keys) for sk in sub_keys}
+               if hook:
+                   dist_lookup = prune_invalid_keys(dist_lookup, full_prefix)
+                   if len(dist_lookup.keys()) == 0:
+                       # check it here
+                       continue
+               found = True
+               keylen = len(sub_keys[0])
+               """
+               for ii in range(len(sub_keys)):
+                   dist_lookup = lookup_dict[sub_keys[ii]]
+                   if hook:
+                       dist_lookup = prune_invalid_keys(dist_lookup, full_prefix)
+                       if len(dist_lookup.keys()) == 0:
+                           # check it here
+                           continue
+                   found = True
+                   keylen = len(sub_keys[ii])
+                """
+            if found:
+                break
+        if not found:
+            # failover case
+            # sub_keys = sorted(list(set(lookup_key)))
+            # dist_lookup = {sk: 1. / len(sub_keys) for sk in sub_keys}
+            sub_keys = sorted(list(full_prefix))
+            dist_lookup = collections.Counter(sub_keys)
+            """
+            if hook:
+                prune_invalid_keys(dist_lookup, full_prefix)
+                # check it here too? Or just let it slide...
+                pass
+            """
+    #if hook:
+    #    from IPython import embed; embed(); raise ValueError()
     return dist_lookup
 
 
 temperature = .25
 def prob_func(prefix):
     history = prefix[-joint_order:]
+    pitch_prefix = [p[0] for p in prefix]
     pitch_history = [h[0] for h in history]
+    dur_prefix = [p[1] for p in prefix]
     dur_history = [h[1] for h in history]
     p_lu = tuple(pitch_history)
     d_lu = tuple(dur_history)
-    pitch_dist = rolloff_lookup(p_total_frequency, p_lu)
-    dur_dist = rolloff_lookup(d_total_frequency, d_lu)
+    pitch_dist = rolloff_lookup(p_total_frequency, p_lu, pitch_prefix, hook_check)
+    dur_dist = rolloff_lookup(d_total_frequency, d_lu, dur_prefix, False)
     dist = []
     # model as p(x, y) = p(x) * p(y)
     for pk in pitch_dist.keys():
@@ -405,6 +527,8 @@ for a in valid_itr:
     pitch_mb, pitch_mask, dur_mb, dur_mask = a[:4]
     pitch_mb, _ = pre_p(pitch_mb, quantize_it=False)
     dur_mb, _ = pre_d(dur_mb, quantize_it=False)
+
+    pitch_mb = np.cumsum(pitch_mb, axis=0)
     pitch_mb = pitch_mb[ext:]
     dur_mb = dur_mb[ext:]
     pitches_and_durations_to_pretty_midi(pitch_mb, dur_mb,
@@ -422,6 +546,8 @@ for a in valid_itr:
     pitch_mb, pitch_mask, dur_mb, dur_mask = a[:4]
     pitch_mb, _ = pre_p(pitch_mb, quantize_it=True)
     dur_mb, _ = pre_d(dur_mb, quantize_it=True)
+
+    pitch_mb = np.cumsum(pitch_mb, axis=0)
     pitch_mb = pitch_mb[ext:]
     dur_mb = dur_mb[ext:]
     pitches_and_durations_to_pretty_midi(pitch_mb, dur_mb,
@@ -433,7 +559,6 @@ for a in valid_itr:
                                          add_to_name=i * pitch_mb.shape[1])
     i += 1
 valid_itr.reset()
-
 
 i = 0
 for a in valid_itr:
@@ -456,11 +581,14 @@ for a in valid_itr:
         start_token = [tuple([qp, dp]) for qp, dp in zip(start_pitch_token, start_dur_token)]
         # eos for pitch, don't care what dur
         end_token = [(0, None)]
-        stochastic = False
+        stochastic = True
         diversity_score = "set"
         beam_width = 15
         clip = 60
-        timeout = 10
+        timeout = 20
+        debug = False
+        #timeout = None
+        #debug = True
         verbose = True
         random_state = np.random.RandomState(90210)
         b = beamsearch(prob_func, beam_width,
@@ -471,7 +599,8 @@ for a in valid_itr:
                        stochastic=stochastic,
                        random_state=random_state,
                        verbose=verbose,
-                       beam_timeout=timeout)
+                       beam_timeout=timeout,
+                       debug=debug)
 
         if len(b) > 0:
             final_beams.append(b)
@@ -515,9 +644,11 @@ for a in valid_itr:
         quantized_pitch_seqs = codebook_lookup([np.array([ip[0] for ip in p[0]]).astype("int32") for p in b[:5]], pitch_codebook, 4)
         quantized_dur_seqs = codebook_lookup([np.array([ip[1] for ip in p[0]]).astype("int32") for p in b[:5]], dur_codebook, 4)
 
+        """
         # rerank top 5 by length
         quantized_pitch_seqs = list(sorted(quantized_pitch_seqs, key=lambda x: len(x)))[::-1]
         quantized_dur_seqs = list(sorted(quantized_dur_seqs, key=lambda x: len(x)))[::-1]
+        """
 
         final_pitches.extend(quantized_pitch_seqs)
         final_durs.extend(quantized_dur_seqs)
@@ -540,6 +671,7 @@ for a in valid_itr:
         q_pitch_mb = q_pitch_mb[:min_len]
         q_dur_mb = q_dur_mb[:min_len]
 
+        # is this just unfixup????
         pitch_where = []
         duration_where = []
         pl = mu['pitch_list']
@@ -557,9 +689,11 @@ for a in valid_itr:
         for n, dw in enumerate(duration_where):
             q_dur_mb[dw] = dl[n]
 
+        q_pitch_mb = np.cumsum(q_pitch_mb, axis=0)
         # ext in order to avoid influence of "priming"
         q_pitch_mb = q_pitch_mb[ext:]
         q_dur_mb = q_dur_mb[ext:]
+
         if q_pitch_mb.shape[0] == 0:
             continue
         if q_dur_mb.shape[0] == 0:
@@ -581,7 +715,12 @@ for a in valid_itr:
             # if any beam fails zero it out
             sz = np.prod(q_pitch_mb[:leadin, mi].shape)
             # ni here because multiple beams are comparing to one element
-            matches = (f_q_pitch_mb[:leadin, ni] == q_pitch_mb[:leadin, mi]).sum()
+            lp = f_q_pitch_mb[:leadin, ni]
+            rp = q_pitch_mb[:leadin, mi]
+            if lp.shape[0] > 0 and rp.shape[0] > 0 and rp.shape[0] == lp.shape[0]:
+                matches = (lp == rp).sum()
+            else:
+                matches = 0
 
             if matches < (sz // 2):
                 final_q_pitch_mb[:, mi] = q_pitch_mb[:, mi]
@@ -595,7 +734,11 @@ for a in valid_itr:
         q_pitch_mb = final_q_pitch_mb
         q_dur_mb = final_q_dur_mb
 
-        name_tag = "test_markov_sample_{}".format(ni) + "_{}.mid"
+
+        if ni < 10:
+            name_tag = "test_markov_sample_0{}".format(ni) + "_{}.mid"
+        else:
+            name_tag = "test_markov_sample_{}".format(ni) + "_{}.mid"
         path = "samples/samples/"
         pitches_and_durations_to_pretty_midi(q_pitch_mb, q_dur_mb,
                                              save_dir=path,

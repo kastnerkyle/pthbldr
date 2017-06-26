@@ -1365,7 +1365,7 @@ def _single_extract_music21(files, data_path, skip_chords, verbose, n):
     p.keySignature = k
 
     # none if there is no data aug
-    an = "C" if "major" in k.name else "A"
+    an = "B" if "major" in k.name else "D"
 
     try:
         pc = pitch.Pitch(an)
@@ -1390,6 +1390,7 @@ def _single_extract_music21(files, data_path, skip_chords, verbose, n):
     except TypeError:
         #raise ValueError("Non-transpose not yet supported")
         return ("null",)
+        """
         pc = pitch.Pitch(an)
         i = interval.Interval(k.tonic, pc)
         # FIXME: In this case chords are unnormed?
@@ -1419,6 +1420,7 @@ def _single_extract_music21(files, data_path, skip_chords, verbose, n):
         else:
             pitches -= 12
             pitches += pct
+        """
 
     str_key = "{} minor".format(an) if "minor" in k.name else "{} major".format(an)
 
@@ -1530,6 +1532,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
             pickle.dump(d, f)
         logger.info("Pickle file %s saved" % pickle_path)
     else:
+        logger.info("Loading cached data from {}".format(pickle_path))
         with open(pickle_path, "rb") as f:
             d = pickle.load(f)
 
@@ -1755,7 +1758,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
 
     quarter_length_list = sorted([float(ql) for ql in list(set(all_quarter_length))])
     all_quarter_length = [float(ql) for ql in all_quarter_length]
-    d = {"list_of_data_pitch": ldp,
+    r = {"list_of_data_pitch": ldp,
          "list_of_data_duration": ldd,
          "list_of_data_key": all_keys,
          "list_of_data_chord": all_chord,
@@ -1767,7 +1770,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
          "duration_list": duration_list,
          "quarter_length_list": quarter_length_list,
          "filename_list": all_filenames}
-    return d
+    return r
 
 
 def check_fetch_symbtr_music21():
@@ -1848,7 +1851,7 @@ def check_fetch_bach_chorales_music21():
     return partial_path
 
 
-def fetch_bach_chorales_music21(keys=["C major", "A minor"],
+def fetch_bach_chorales_music21(keys=["B major", "D minor"],
                                 truncate_length=100,
                                 compress_pitch=False,
                                 compress_duration=False,
@@ -2168,8 +2171,8 @@ def pitches_and_durations_to_pretty_midi(pitches, durations,
     elif voice_params == "legend":
         # LoZ
         voice_mappings = ["Acoustic Guitar (nylon)"] * 3 + ["Pan Flute"]
-        voice_velocity = [20, 16, 25, 10]
-        voice_offset = [0, 0, 0, 12]
+        voice_velocity = [20, 16, 25, 20]
+        voice_offset = [0, 0, 0, 0]
         voice_decay = [1., 1., 1., .95]
     elif voice_params == "organ":
         voice_mappings = ["Church Organ"] * 4
