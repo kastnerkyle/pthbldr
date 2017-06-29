@@ -1267,9 +1267,10 @@ def music21_to_chord_duration(p):
 
 def music21_to_pitch_duration(p):
     """
-    Takes in a Music21 score, and outputs two numpy arrays
+    Takes in a Music21 score, and outputs two numpy arrays and a list
     One for pitch
     One for duration
+    list for part times of each voice
     """
     parts = []
     parts_times = []
@@ -1313,7 +1314,7 @@ def music21_to_pitch_duration(p):
                 pass
             else:
                 raise ValueError("Unexpected multi-match error")
-    return to_fill_pitch, to_fill_dur
+    return to_fill_pitch, to_fill_dur, parts_times
 
 
 # http://stackoverflow.com/questions/2281850/timeout-function-if-it-takes-too-long-to-finish
@@ -1382,7 +1383,7 @@ def _single_extract_music21(files, data_path, skip_chords, verbose, n):
             chord_durations = ["null"]
         else:
             chords, chord_durations = music21_to_chord_duration(p)
-        pitches, durations = music21_to_pitch_duration(p)
+        pitches, durations, part_times = music21_to_pitch_duration(p)
         pitch_duration_time = time.time()
         if verbose:
             r = pitch_duration_time - start_time
@@ -1428,7 +1429,7 @@ def _single_extract_music21(files, data_path, skip_chords, verbose, n):
     if verbose:
         r = ttime - start_time
         logger.info("Overall file time {}:{}".format(f, r))
-    return (pitches, durations, str_key, f, p.quarterLength, chords, chord_durations)
+    return (pitches, durations, part_times, str_key, f, p.quarterLength, chords, chord_durations)
 
 
 # http://stackoverflow.com/questions/29494001/how-can-i-abort-a-task-in-a-multiprocessing-pool-after-a-timeout
@@ -1468,6 +1469,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
         all_transposed_pitch = []
         all_transposed_duration = []
         all_transposed_keys = []
+        all_part_times = []
         all_file_names = []
         all_transposed_chord = []
         all_transposed_chord_duration = []
@@ -1503,7 +1505,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
 
         for n, r in enumerate(result):
             if r[0] != "null":
-                (pitches, durations,
+                (pitches, durations, part_times,
                 key, fname, quarter_length,
                 chords, chord_durations) = r
 
@@ -1511,6 +1513,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
                 all_transposed_chord_duration.append(chord_durations)
                 all_transposed_pitch.append(pitches)
                 all_transposed_duration.append(durations)
+                all_part_times.append(part_times)
                 all_transposed_keys.append(key)
                 all_file_names.append(fname)
                 all_quarter_length.append(quarter_length)
@@ -1522,6 +1525,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
             logger.info("Overall time {}".format(r))
         d = {"data_pitch": all_transposed_pitch,
              "data_duration": all_transposed_duration,
+             "data_part_times": all_part_times,
              "data_key": all_transposed_keys,
              "data_chord": all_transposed_chord,
              "data_chord_duration": all_transposed_chord_duration,
@@ -1554,11 +1558,15 @@ def _music_extract(data_path, pickle_path, ext=".xml",
     major_quarter_length = []
     minor_quarter_length = []
 
+    major_part_times = []
+    minor_part_times = []
+
     keys = []
     for i in range(len(d["data_key"])):
         k = d["data_key"][i]
         ddp = d["data_pitch"][i]
         ddd = d["data_duration"][i]
+        ddt = d["data_part_times"][i]
         nm = d["file_names"][i]
         ql = d["data_quarter_length"][i]
         try:
@@ -1571,6 +1579,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
         if "major" in k:
             major_pitch.append(ddp)
             major_duration.append(ddd)
+            major_part_times.append(ddt)
             major_filename.append(nm)
             major_chord.append(ch)
             major_chord_duration.append(chd)
@@ -1579,6 +1588,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
         elif "minor" in k:
             minor_pitch.append(ddp)
             minor_duration.append(ddd)
+            minor_part_times.append(ddt)
             minor_filename.append(nm)
             minor_chord.append(ch)
             minor_chord_duration.append(chd)
@@ -1599,6 +1609,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
 
     all_pitches = major_pitch + minor_pitch
     all_durations = major_duration + minor_duration
+    all_part_times = major_part_times + minor_part_times
     all_filenames = major_filename + minor_filename
     all_chord = major_chord + minor_chord
     all_chord_duration = major_chord_duration + minor_chord_duration
@@ -1636,6 +1647,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
 
     final_pitches = []
     final_durations = []
+    final_part_times = []
     final_filenames = []
     final_keys = []
     final_quarter_length = []
@@ -1652,6 +1664,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
             #if n == max_note:
             final_pitches.append(all_pitches[i])
             final_durations.append(all_durations[i])
+            final_part_times.append(all_part_times[i])
             final_filenames.append(all_filenames[i])
             final_keys.append(keys[i])
             final_quarter_length.append(all_quarter_length[i])
@@ -1677,6 +1690,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
 
     all_pitches = final_pitches
     all_durations = final_durations
+    all_part_times = final_part_times
     all_filenames = final_filenames
     all_keys = final_keys
     all_quarter_length = final_quarter_length
@@ -1725,41 +1739,68 @@ def _music_extract(data_path, pickle_path, ext=".xml",
     ldd = [replace_with_indices(ddi.T, duration_lu)[0][:, ::-1]
            for ddi in all_durations]
 
+    ldt = []
+
+    # align part times into a matrix
+    for vi in range(len(ldd)):
+        # get voice count
+        shp = ldd[vi].shape
+        ldti = np.zeros_like(ldd[vi])
+
+        # part times are backwards ordered from ldd
+        part_time = all_part_times[vi][::-1]
+        for i in range(shp[1]):
+            nonzero_idx = ldd[vi][:, i] != 0
+            assert nonzero_idx.sum() == len(part_time[i])
+            ldti[nonzero_idx, i] = part_time[i]
+        ldt.append(ldti)
+
     force_voices = equal_voice_count
-    def _trunc(a, b):
+    def _trunc(a, b, c):
+        assert a.shape == b.shape == c.shape
         # take most active voices?
         actives = np.where(a > 0)[1]
         xx, zz = count_unique(actives)
         idx = np.sort(np.argsort(zz)[:force_voices])
-        return a[:, idx], b[:, idx]
+        return a[:, idx], b[:, idx], c[:, idx]
         #return a[:, -force_voices:], b[:, -force_voices:]
         #return a[:, :force_voices], b[:, :force_voices]
 
-    def _ext(a, b):
+    def _ext(a, b, c):
+        assert a.shape == b.shape == c.shape
         # if extending, fill in SBAT order
         new_a = np.concatenate((a, np.zeros((a.shape[0], force_voices - a.shape[1])).astype(a.dtype)), axis=1)
         new_b = np.concatenate((b, np.zeros((b.shape[0], force_voices - b.shape[1])).astype(b.dtype)), axis=1)
-        return new_a, new_b
+        new_c = np.concatenate((c, np.zeros((c.shape[0], force_voices - c.shape[1])).astype(c.dtype)), axis=1)
+        return new_a, new_b, new_c
 
     new_ldp = []
     new_ldd = []
+    new_ldt = []
     for ii in range(len(ldp)):
         if ldp[ii].shape[1] == force_voices:
             pp = ldp[ii]
             dd = ldd[ii]
+            tt = ldt[ii]
         elif ldp[ii].shape[1] < force_voices:
-            pp, dd = _ext(ldp[ii], ldd[ii])
+            pp, dd, tt = _ext(ldp[ii], ldd[ii], ldt[ii])
         elif ldp[ii].shape[1] > force_voices:
-            pp, dd = _trunc(ldp[ii], ldd[ii])
+            pp, dd, tt = _trunc(ldp[ii], ldd[ii], ldt[ii])
         new_ldp.append(pp)
         new_ldd.append(dd)
+        new_ldt.append(tt)
     ldp = new_ldp
     ldd = new_ldd
+    ldt = new_ldt
 
     quarter_length_list = sorted([float(ql) for ql in list(set(all_quarter_length))])
     all_quarter_length = [float(ql) for ql in all_quarter_length]
+
+    time_list = sorted(list(np.unique(np.concatenate([np.unique(ldti.ravel()) for ldti in ldt]))))
+
     r = {"list_of_data_pitch": ldp,
          "list_of_data_duration": ldd,
+         "list_of_data_time": ldt,
          "list_of_data_key": all_keys,
          "list_of_data_chord": all_chord,
          "list_of_data_chord_duration": all_chord_duration,
@@ -1768,6 +1809,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
          "chord_duration_list": final_chord_duration_set,
          "pitch_list": pitch_list,
          "duration_list": duration_list,
+         "time_list": time_list,
          "quarter_length_list": quarter_length_list,
          "filename_list": all_filenames}
     return r
@@ -1895,6 +1937,7 @@ def fetch_bach_chorales_music21(keys=["B major", "D minor"],
 
     lp = mu["list_of_data_pitch"]
     ld = mu["list_of_data_duration"]
+    lt = mu["list_of_data_time"]
     lch = mu["list_of_data_chord"]
     lchd = mu["list_of_data_chord_duration"]
     lql = mu["list_of_data_quarter_length"]
@@ -1904,6 +1947,7 @@ def fetch_bach_chorales_music21(keys=["B major", "D minor"],
 
     lp2 = _len_prune(lp)
     ld2 = _len_prune(ld)
+    lt2 = _len_prune(lt)
     lch2 = _len_prune(lch)
     lchd2 = _len_prune(lchd)
 
@@ -1914,12 +1958,14 @@ def fetch_bach_chorales_music21(keys=["B major", "D minor"],
 
     lp2 = _key_prune(lp2)
     ld2 = _key_prune(ld2)
+    lt2 = _key_prune(lt2)
     lch2 = _key_prune(lch2)
     lchd2 = _key_prune(lchd2)
     lql2 = _key_prune(lql)
 
     lp = lp2
     ld = ld2
+    lt = lt2
     lch = lch2
     lchd = lchd2
     lql = lql2
@@ -1944,6 +1990,7 @@ def fetch_bach_chorales_music21(keys=["B major", "D minor"],
 
     mu["list_of_data_pitch"] = lp
     mu["list_of_data_duration"] = ld
+    mu["list_of_data_time"] = lt
     mu["list_of_data_chord"] = lch
     mu["list_of_data_chord_duration"] = lchd
     mu["list_of_data_quarter_length"] = lql
@@ -2137,6 +2184,60 @@ def fetch_haralick_midi_music21(keys=["C major", "A minor"],
                           skip_chords=True, verbose=True)
 
 
+def quantized_to_pretty_midi(quantized,
+                             quantized_bin_size,
+                             save_dir="samples",
+                             name_tag="sample_{}.mid",
+                             add_to_name=0,
+                             lower_pitch_limit=12,
+                             list_of_quarter_length=None,
+                             default_quarter_length=47,
+                             voice_params="woodwinds"):
+    is_seq_of_seq = False
+    try:
+        quantized[0][0]
+        if not hasattr(quantized, "flatten"):
+            is_seq_of_seq = True
+    except:
+        try:
+            quantized.shape
+        except AttributeError:
+            raise ValueError("quantized must be a sequence of sequence (such as list of array, or list of list) or numpy array")
+    # list of list or mb?
+    pitches = []
+    durations = []
+    if is_seq_of_seq:
+        sz = len(quantized)
+        for i in range(sz):
+            q = quantized[i]
+            pitch_i = []
+            dur_i = []
+            cur = None
+            count = 0
+            for qi in q:
+                if qi != cur:
+                    pitch_i.append(qi)
+                    quarter_count = quantized_bin_size * (count + 1)
+                    dur_i.append(quarter_count)
+                    cur = qi
+                    count = 0
+                else:
+                    count += 1
+            pitches.append(pitch_i)
+            durations.append(dur_i)
+    else:
+        sz = quantized.shape[1]
+        raise ValueError("NYI")
+    pitches_and_durations_to_pretty_midi(pitches, durations,
+                                             save_dir=save_dir,
+                                             name_tag=name_tag,
+                                             add_to_name=add_to_name,
+                                             lower_pitch_limit=lower_pitch_limit,
+                                             list_of_quarter_length=list_of_quarter_length,
+                                             default_quarter_length=default_quarter_length,
+                                             voice_params=voice_params)
+
+
 def pitches_and_durations_to_pretty_midi(pitches, durations,
                                          save_dir="samples",
                                          name_tag="sample_{}.mid",
@@ -2145,10 +2246,23 @@ def pitches_and_durations_to_pretty_midi(pitches, durations,
                                          list_of_quarter_length=None,
                                          default_quarter_length=47,
                                          voice_params="woodwinds"):
+    # allow list of list
     """
     durations assumed to be scaled to quarter lengths e.g. 1 is 1 quarter note
     2 is a half note, etc
     """
+    is_seq_of_seq = False
+    try:
+        pitches[0][0]
+        durations[0][0]
+        if not hasattr(pitches, "flatten") and not hasattr(durations, "flatten"):
+            is_seq_of_seq = True
+    except:
+        try:
+            pitches.shape
+            durations.shape
+        except AttributeError:
+            raise ValueError("pitches and durations must be a sequence of sequence (such as list of array, or list of list) or numpy array")
 
     import pretty_midi
     # BTAS mapping
@@ -2210,16 +2324,28 @@ def pitches_and_durations_to_pretty_midi(pitches, durations,
     # keep same scale just make it louder?
     voice_velocity = [int((80 - dynamic_range) + int(v - mi)) for v in voice_velocity]
 
-    len_durations = len(durations)
-    order = durations.shape[-1]
+    if not is_seq_of_seq:
+        order = durations.shape[-1]
+    else:
+        try:
+            order = durations[0].shape[-1]
+        except:
+            order = 1
+            pitches = [np.array(p)[:, None] for p in pitches]
+            durations = [np.array(d)[:, None] for d in durations]
     voice_mappings = voice_mappings[-order:]
     voice_velocity = voice_velocity[-order:]
     voice_offset = voice_offset[-order:]
     voice_decay = voice_decay[-order:]
+    if not is_seq_of_seq:
+        pitches = [pitches[:, i, :] for i in range(pitches.shape[1])]
+        durations = [durations[:, i, :] for i in range(durations.shape[1])]
 
-    n_samples = durations.shape[1]
-    assert len(durations) == len(pitches)
+    n_samples = len(durations)
     for ss in range(n_samples):
+        durations_ss = durations[ss]
+        pitches_ss = pitches[ss]
+        assert len(durations_ss) == len(pitches_ss)
         pm_obj = pretty_midi.PrettyMIDI()
         # Create an Instrument instance for a cello instrument
         def mkpm(name):
@@ -2238,10 +2364,10 @@ def pitches_and_durations_to_pretty_midi(pitches, durations,
             time_scale = 60. / list_of_quarter_length[ss]
 
         time_offset = np.zeros((order,))
-        for ii in range(len_durations):
+        for ii in range(len(durations_ss)):
             for jj in range(order):
-                pitches_isj = pitches[ii, ss, jj]
-                durations_isj = durations[ii, ss, jj]
+                pitches_isj = pitches_ss[ii, jj]
+                durations_isj = durations_ss[ii, jj]
                 p = int(pitches_isj)
                 d = durations_isj
                 if d < 0:

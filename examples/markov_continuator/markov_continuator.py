@@ -7,6 +7,7 @@ import copy
 import collections
 
 from pthbldr.datasets import pitches_and_durations_to_pretty_midi
+from pthbldr.datasets import quantized_to_pretty_midi
 from pthbldr.datasets import list_of_array_iterator
 from pthbldr.datasets import fetch_bach_chorales_music21
 from pthbldr.utils import minibatch_kmedians, beamsearch
@@ -20,8 +21,53 @@ from pthbldr.utils import minibatch_kmedians, beamsearch
 #n_epochs = 2350
 #n_epochs = 3000
 
-'''
 mu = fetch_bach_chorales_music21()
+order = mu["list_of_data_pitch"][0].shape[-1]
+
+random_state = np.random.RandomState(1999)
+
+lp = mu["list_of_data_pitch"]
+ld = mu["list_of_data_duration"]
+lt = mu["list_of_data_time"]
+lql = mu["list_of_data_quarter_length"]
+
+default_quarter_length = 55
+voice_type = "woodwinds"
+
+soprano_p = lp[0][:, 0]
+soprano_t = lt[0][:, 0]
+
+
+min_time_value = min([min(lt[i][lt[i] > 0]) for i in range(len(lt))])
+possibles = [tli for tli in mu["time_list"] if tli > 0]
+divs = [(all([(e % di) == 0 for e in possibles]), di) for di in possibles]
+min_div = min([di[1] for di in divs if di[0] == True])
+
+
+def pitch_and_time_to_piano_roll(pitch_line, time_line, quantize_value):
+    nonzero_pitch = (pitch_line != -1)
+    nonzero_time = (time_line != 0)
+    assert (nonzero_pitch == nonzero_time).sum() == len(nonzero_pitch)
+    new_pitch_line = pitch_line[nonzero_pitch]
+    new_time_line = time_line[nonzero_time]
+    expand_time_line = (new_time_line / quantize_value).astype("int32")
+    assert all([et > 0 for et in expand_time_line])
+    assert len(expand_time_line) == len(new_pitch_line)
+    quantized_pitch_line = np.concatenate([np.array([p] * etl) for p, etl in zip(new_pitch_line, expand_time_line)])
+    return quantized_pitch_line
+
+soprano_q = pitch_and_time_to_piano_roll(soprano_p, soprano_t, min_div)
+
+name_tag = "sample_{}.mid"
+soprano_q = [soprano_q]
+quantized_to_pretty_midi(soprano_q, min_div,
+                         save_dir="samples/samples",
+                         name_tag=name_tag,
+                         #list_of_quarter_length=[int(.5 * qpm) for qpm in qpms],
+                         default_quarter_length=default_quarter_length,
+                         voice_params=voice_type)
+
+'''
 order = mu["list_of_data_pitch"][0].shape[-1]
 
 random_state = np.random.RandomState(1999)
