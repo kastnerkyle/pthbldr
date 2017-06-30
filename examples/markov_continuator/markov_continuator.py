@@ -5,6 +5,7 @@ import os
 import cPickle as pickle
 import copy
 import collections
+from collections import defaultdict
 
 from pthbldr.datasets import pitches_and_durations_to_pretty_midi
 from pthbldr.datasets import quantized_to_pretty_midi
@@ -55,6 +56,118 @@ def pitch_and_time_to_piano_roll(pitch_line, time_line, quantize_value):
     assert len(expand_time_line) == len(new_pitch_line)
     quantized_pitch_line = np.concatenate([np.array([p] * etl) for p, etl in zip(new_pitch_line, expand_time_line)])
     return quantized_pitch_line
+
+# https://csl.sony.fr/downloads/papers/uploads/pachet-02f.pdf
+# https://stackoverflow.com/questions/11015320/how-to-create-a-trie-in-python
+class Continuator:
+    def __init__(self, random_state):
+        self.root = dict()
+        self.index = dict()
+        # 0 indexed
+        self.continuation_offset = 0
+        self.random_state = random_state
+        # use this to reduce the complexity of queries
+        self.max_seq_len_seen = 0
+
+
+    def insert(self, word, continuation_offset=None):
+        if continuation_offset is None:
+            for n, wi in enumerate(word):
+                # 1 indexed to match the paper
+                self.index[n + self.continuation_offset + 1] = wi
+            self.continuation_offset += len(word)
+            continuation_offset = self.continuation_offset
+            self.max_seq_len_seen = max(len(word), self.max_seq_len_seen)
+        co = continuation_offset
+        root = self.root
+        current = root
+        word_slice = word[:-1]
+        for letter in word_slice[::-1]:
+            if letter not in current:
+                current[letter] = [co, {}]
+            else:
+                current[letter].insert(len(current[letter]) - 1, co)
+            current = current[letter][-1]
+        current["_end"] = None
+        if len(word) > 1:
+            self.insert(word[:-1], co - 1)
+
+
+    def prefix_search(self, prefix):
+        root = self.root
+        current = root
+        subword = prefix[::-1]
+        continuations = []
+        for letter in subword:
+            if letter in current and "_end" in current[letter][-1].keys():
+                continuations += current[letter][:-1]
+                return continuations
+            elif letter not in current:
+                # node not found
+                return []
+            current = current[letter][-1]
+        # short sequence traversed to partial point of tree ("BC case from paper")
+        continuations = []
+        for k in current.keys():
+            continuations += current[k][:-1]
+        return continuations
+
+
+    def index_lookup(self, indices):
+        return [self.index[i] for i in indices]
+
+
+    def next(self, prefix):
+        ci = self.prefix_search(prefix)
+        if len(ci) > 0:
+            possibles = self.index_lookup(ci)
+        else:
+            sub_prefix = prefix[-self.max_seq_len_seen + 1:]
+            possibles = None
+            for i in range(len(sub_prefix)):
+                ci = self.prefix_search(sub_prefix[i:])
+                if len(ci) > 0:
+                    possibles = self.index_lookup(ci)
+                    break
+        if possibles is not None:
+            # choose one of possibles
+            p = self.random_state.choice(possibles)
+        else:
+            p = ""
+        return p
+
+    def continuate(self, seq):
+        seq = "AB"
+        res = None
+        while res != "":
+            if res is not None:
+                seq = seq + res
+            res = t.next(seq)
+        return seq
+
+# tests from
+# https://csl.sony.fr/downloads/papers/uploads/pachet-02f.pdf
+random_state = np.random.RandomState(1999)
+t = Continuator(random_state)
+t.insert("ABCD")
+t.insert("ABBC")
+ret = t.continuate("AB")
+from IPython import embed; embed(); raise ValueError()
+
+'''
+seq = "AB"
+res = t.next(seq)
+seq = seq + res
+res = t.next(seq)
+seq = seq + res
+res = t.next(seq)
+seq = seq + res
+res = t.next(seq)
+if res == "":
+    from IPython import embed; embed(); raise ValueError()
+else:
+    raise ValueError("BUG, THIS SHOULD MATCH THE PAPER")
+'''
 
 soprano_q = pitch_and_time_to_piano_roll(soprano_p, soprano_t, min_div)
 
@@ -801,5 +914,3 @@ for ff in final_files:
         print("Removing file {} of size {}".format(ff, sz))
         os.remove(ff)
 '''
-
-from IPython import embed; embed(); raise ValueError()
