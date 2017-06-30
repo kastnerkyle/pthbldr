@@ -70,7 +70,10 @@ class Continuator:
         self.max_seq_len_seen = 0
 
 
-    def insert(self, word, continuation_offset=None):
+    def insert(self, list_of_symbol, continuation_offset=None):
+        if isinstance(list_of_symbol, (str, unicode)):
+            raise AttributeError("list of symbol must not be string")
+        word = list_of_symbol
         if continuation_offset is None:
             for n, wi in enumerate(word):
                 # 1 indexed to match the paper
@@ -93,7 +96,7 @@ class Continuator:
             self.insert(word[:-1], co - 1)
 
 
-    def prefix_search(self, prefix):
+    def _prefix_search(self, prefix):
         root = self.root
         current = root
         subword = prefix[::-1]
@@ -113,56 +116,70 @@ class Continuator:
         return continuations
 
 
-    def index_lookup(self, indices):
+    def _index_lookup(self, indices):
         return [self.index[i] for i in indices]
 
 
-    def next(self, prefix):
-        ci = self.prefix_search(prefix)
+    def _next(self, prefix):
+        ci = self._prefix_search(prefix)
         if len(ci) > 0:
-            possibles = self.index_lookup(ci)
+            possibles = self._index_lookup(ci)
         else:
             sub_prefix = prefix[-self.max_seq_len_seen + 1:]
             possibles = None
             for i in range(len(sub_prefix)):
-                ci = self.prefix_search(sub_prefix[i:])
+                ci = self._prefix_search(sub_prefix[i:])
                 if len(ci) > 0:
-                    possibles = self.index_lookup(ci)
+                    possibles = self._index_lookup(ci)
                     break
         if possibles is not None:
             # choose one of possibles
-            p = self.random_state.choice(possibles)
+            irange = np.arange(len(possibles))
+            i = self.random_state.choice(irange)
+            p = possibles[i]
         else:
             p = ""
-        return p
+        return [p]
 
     def continuate(self, seq):
-        seq = "AB"
+        if isinstance(seq, (str, unicode)):
+            raise AttributeError("prefix must list of symbols, not string")
         res = None
-        while res != "":
+        while res != [""]:
             if res is not None:
                 seq = seq + res
-            res = t.next(seq)
+            res = t._next(seq)
         return seq
 
 # tests from
 # https://csl.sony.fr/downloads/papers/uploads/pachet-02f.pdf
 random_state = np.random.RandomState(1999)
 t = Continuator(random_state)
-t.insert("ABCD")
-t.insert("ABBC")
-ret = t.continuate("AB")
+t.insert(["A", "B", "C", "D"])
+t.insert(["A", "B", "B", "C"])
+ret = t.continuate(["A", "B"])
+print(t.root)
+print(ret)
+
+# Test the duration / tuple case
+random_state = np.random.RandomState(1999)
+t = Continuator(random_state)
+t.insert([("A", 1), ("B", 1), ("C", 1), ("D", 1)])
+t.insert([("A", 1), ("B", 1), ("B", 1), ("C", 1)])
+ret = t.continuate([("A", 1), ("B", 1)])
+print(t.root)
+print(ret)
 from IPython import embed; embed(); raise ValueError()
 
 '''
 seq = "AB"
-res = t.next(seq)
+res = t._next(seq)
 seq = seq + res
-res = t.next(seq)
+res = t._next(seq)
 seq = seq + res
-res = t.next(seq)
+res = t._next(seq)
 seq = seq + res
-res = t.next(seq)
+res = t._next(seq)
 if res == "":
     from IPython import embed; embed(); raise ValueError()
 else:
