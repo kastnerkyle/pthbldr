@@ -1289,6 +1289,7 @@ def music21_to_pitch_duration(p):
         parts.append(part)
         parts_times.append(part_time)
 
+    from IPython import embed; embed(); raise ValueError()
     cumulative_times = map(lambda x: np.cumsum(x), parts_times)
     # shift so all starts at 0
     cumulative_times = [cu - cu[0] for cu in cumulative_times]
@@ -1459,7 +1460,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
                    upper_voice_limit=None,
                    equal_voice_count=4,
                    parse_timeout=100,
-                   multiprocess_count=4,
+                   multiprocess_count=None,
                    verbose=False):
 
     if not os.path.exists(pickle_path):
@@ -1540,6 +1541,7 @@ def _music_extract(data_path, pickle_path, ext=".xml",
         with open(pickle_path, "rb") as f:
             d = pickle.load(f)
 
+    from IPython import embed; embed(); raise ValueError()
     major_pitch = []
     minor_pitch = []
 
@@ -1753,7 +1755,8 @@ def _music_extract(data_path, pickle_path, ext=".xml",
             nonzero_idx = ldd[vi][:, i] != 0
             assert nonzero_idx.sum() == len(part_time[i])
             ldti[nonzero_idx, i] = part_time[i]
-        ldt.append(ldti)
+        cs = np.cumsum(ldti, axis=0)
+        ldt.append(cs)
 
     force_voices = equal_voice_count
     def _trunc(a, b, c):
