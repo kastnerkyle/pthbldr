@@ -23,54 +23,39 @@ from pthbldr.utils import minibatch_kmedians, beamsearch
 #n_epochs = 3000
 
 mu = fetch_bach_chorales_music21()
-order = mu["list_of_data_pitch"][0].shape[-1]
+order = len(mu["list_of_data_pitch"][0])
 
 random_state = np.random.RandomState(1999)
 key = "minor"
 
 lp = mu["list_of_data_pitch"]
-ld = mu["list_of_data_duration"]
 lt = mu["list_of_data_time"]
+ltd = mu["list_of_data_time_delta"]
 lql = mu["list_of_data_quarter_length"]
 
 if key != None:
     keep_lp = []
-    keep_ld = []
     keep_lt = []
+    keep_ltd = []
     keep_lql = []
     lk = mu["list_of_data_key"]
     for n in range(len(lp)):
         if key in lk[n]:
             keep_lp.append(lp[n])
-            keep_ld.append(ld[n])
             keep_lt.append(lt[n])
+            keep_ltd.append(ltd[n])
             keep_lql.append(lql[n])
     lp = copy.deepcopy(keep_lp)
-    ld = copy.deepcopy(keep_ld)
     lt = copy.deepcopy(keep_lt)
+    ltd = copy.deepcopy(keep_ltd)
     lql = copy.deepcopy(keep_lql)
 
 
 default_quarter_length = 55
 voice_type = "woodwinds"
-
-min_time_value = min([min(lt[i][lt[i] > 0]) for i in range(len(lt))])
-possibles = [tli for tli in mu["time_list"] if tli > 0]
-divs = [(all([(e % di) == 0 for e in possibles]), di) for di in possibles]
-min_div = 0.25
-
-
-def pitch_and_time_to_piano_roll(pitch_line, time_line, quantize_value):
-    nonzero_pitch = (pitch_line != -1)
-    nonzero_time = (time_line != 0)
-    assert (nonzero_pitch == nonzero_time).sum() == len(nonzero_pitch)
-    new_pitch_line = pitch_line[nonzero_pitch]
-    new_time_line = time_line[nonzero_time]
-    expand_time_line = (new_time_line / quantize_value).astype("int32")
-    assert all([et > 0 for et in expand_time_line])
-    assert len(expand_time_line) == len(new_pitch_line)
-    quantized_pitch_line = np.concatenate([np.array([p] * etl) for p, etl in zip(new_pitch_line, expand_time_line)])
-    return quantized_pitch_line
+split = 20
+clip_gen = 20
+which_voice = 0
 
 # https://csl.sony.fr/downloads/papers/uploads/pachet-02f.pdf
 # https://stackoverflow.com/questions/11015320/how-to-create-a-trie-in-python
@@ -192,41 +177,26 @@ ret = t.continuate([("A", 1), ("B", 1)])
 
 random_state = np.random.RandomState(1999)
 t = Continuator(random_state)
-split = 20
-
-def prune(p, t):
-    from IPython import embed; embed(); raise ValueError()
-    pitch_line = p
-    time_line = t
-    nonzero_pitch = (pitch_line != -1)
-    nonzero_time = (time_line != 0)
-    assert (nonzero_pitch == nonzero_time).sum() == len(nonzero_pitch)
-    new_pitch_line = pitch_line[nonzero_pitch]
-    new_time_line = time_line[nonzero_time]
-    return new_pitch_line, new_time_line
-
 
 inds = range(len(lp))
 for ii in inds:
-    print(ii)
-    pii = lp[ii][:, -1]
-    tii = lt[ii][:, -1]
-    pii, tii = prune(pii, tii)
+    pii = lp[ii][0]
+    tdii = ltd[ii][0]
     if len(pii) % split != 0:
         offset = split * (len(pii) // split)
         pii = pii[:offset]
-        tii = tii[:offset]
+        tdii = tdii[:offset]
 
-    if len(tii) < split or len(pii) < split:
+    if len(tdii) < split or len(pii) < split:
         continue
 
-    tr = tii.reshape(len(tii) // split, -1)
-    pr = pii.reshape(len(pii) // split, -1)
+    tdr = np.array(tdii).reshape(len(tdii) // split, -1)
+    pr = np.array(pii).reshape(len(pii) // split, -1)
 
-    for i in range(len(tr)):
-        tri = tr[i]
+    for i in range(len(tdr)):
+        tdri = tdr[i]
         pri = pr[i]
-        comb = [(pi, ti) for pi, ti in zip(pri, tri)]
+        comb = [(pi, tdi) for pi, tdi in zip(pri, tdri)]
         t.insert(comb)
 
 """
@@ -244,10 +214,10 @@ quantized_to_pretty_midi(ret, min_div,
                          voice_params=voice_type)
 """
 
-tri = tr[0][:20]
-pri = pr[0][:20]
-comb = [(pi, ti) for pi, ti in zip(pri, tri)]
-ret = t.continuate(comb, 100)
+tri = tdr[which_voice]
+pri = pr[which_voice]
+comb = [(pi, tdi) for pi, tdi in zip(pri, tdri)]
+ret = t.continuate(comb, clip_gen)
 
 name_tag = "generated_{}.mid"
 pitches = [[r[0] for r in ret]]
@@ -259,8 +229,16 @@ pitches_and_durations_to_pretty_midi(pitches, durations,
                                      default_quarter_length=default_quarter_length,
                                      voice_params=voice_type)
 
-pii = lp[0][:, -1]
-tii = lt[0][:, -1]
+pii = [lp[0][which_voice]]
+tdii = [ltd[0][which_voice]]
+name_tag = "sample_{}.mid"
+pitches_and_durations_to_pretty_midi(pii, tdii,
+                         save_dir="samples/samples",
+                         name_tag=name_tag,
+                         #list_of_quarter_length=[int(.5 * qpm) for qpm in qpms],
+                         default_quarter_length=default_quarter_length,
+                         voice_params=voice_type)
+"""
 qii = pitch_and_time_to_piano_roll(pii, tii, min_div)
 name_tag = "sample_{}.mid"
 qii = [qii]
@@ -270,3 +248,4 @@ quantized_to_pretty_midi(qii, min_div,
                          #list_of_quarter_length=[int(.5 * qpm) for qpm in qpms],
                          default_quarter_length=default_quarter_length,
                          voice_params=voice_type)
+"""
