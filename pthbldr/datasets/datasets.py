@@ -2194,11 +2194,13 @@ def pitches_and_durations_to_pretty_midi(pitches, durations,
         if not hasattr(pitches, "flatten") and not hasattr(durations, "flatten"):
             is_seq_of_seq = True
     except:
-        try:
-            pitches.shape
-            durations.shape
-        except AttributeError:
-            raise ValueError("pitches and durations must be a sequence of sequence (such as list of array, or list of list) or numpy array")
+        raise ValueError("pitches and durations must be a list of array, or list of list of list (time, voice, pitch/duration)")
+
+    if is_seq_of_seq:
+        if hasattr(pitches[0], "flatten"):
+            # it's a list of array, convert to list of list of list
+            pitches = [[[pitches[i][j, k] for j in range(pitches[i].shape[0])] for k in range(pitches[i].shape[1])] for i in range(len(pitches))]
+            durations = [[[durations[i][j, k] for j in range(durations[i].shape[0])] for k in range(durations[i].shape[1])] for i in range(len(durations))]
 
     import pretty_midi
     # BTAS mapping
