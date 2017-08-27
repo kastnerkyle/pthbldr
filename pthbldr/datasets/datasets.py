@@ -2141,7 +2141,7 @@ def quantized_to_pretty_midi(quantized,
             qq = quantized[ss].T
         for i in range(voices):
             q = qq[i]
-            pitch_i = []
+            pitch_i = [0]
             dur_i = []
             cur = None
             count = 0
@@ -2158,6 +2158,8 @@ def quantized_to_pretty_midi(quantized,
                     count = 0
                 else:
                     count += 1
+            quarter_count = quantized_bin_size * (count + 1)
+            dur_i.append(quarter_count)
             pitches.append(pitch_i)
             durations.append(dur_i)
         all_pitches.append(pitches)
@@ -2170,6 +2172,27 @@ def quantized_to_pretty_midi(quantized,
                                          list_of_quarter_length=list_of_quarter_length,
                                          default_quarter_length=default_quarter_length,
                                          voice_params=voice_params)
+
+
+def pitch_and_duration_to_piano_roll(list_of_pitch_voices, list_of_duration_voices, min_dur):
+    def expand(pitch, dur, min_dur):
+        assert len(pitch) == len(dur)
+        expanded = [int(d // min_dur) for d in dur]
+        check = [d / min_dur for d in dur]
+        assert all([e == c for e, c in zip(expanded, check)])
+        stretch = [[p] * e for p, e in zip(pitch, expanded)]
+        # flatten out to 1 voice
+        return [pi for p in stretch for pi in p]
+
+    res = []
+    for lpv, ldv in zip(list_of_pitch_voices, list_of_duration_voices):
+        qi = expand(lpv, ldv, min_dur)
+        res.append(qi)
+
+    min_len = min([len(ri) for ri in res])
+    res = [ri[:min_len] for ri in res]
+    piano_roll = np.array(res).transpose()
+    return piano_roll
 
 
 def pitches_and_durations_to_pretty_midi(pitches, durations,
