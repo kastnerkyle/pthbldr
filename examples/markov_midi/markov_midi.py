@@ -20,6 +20,7 @@ from pthbldr.utils import minibatch_kmedians, beamsearch
 #n_epochs = 2350
 #n_epochs = 3000
 
+'''
 mu = fetch_bach_chorales_music21()
 order = mu["list_of_data_pitch"][0].shape[-1]
 
@@ -38,9 +39,9 @@ voice_type = "woodwinds"
 subset = None
 key = "minor"
 #subset = 100
-train_cache = True
+train_cache = False
 from_scratch = False
-joint_order = 7
+joint_order = 6
 default_quarter_length = 55
 hook_check = False
 # random-ish ext to check for plagiarism
@@ -531,9 +532,13 @@ for a in valid_itr:
     pitch_mb = np.cumsum(pitch_mb, axis=0)
     pitch_mb = pitch_mb[ext:]
     dur_mb = dur_mb[ext:]
+    if i < 10:
+        name_tag = "test_sample_0{}.mid"
+    else:
+        name_tag = "test_sample_{}.mid"
     pitches_and_durations_to_pretty_midi(pitch_mb, dur_mb,
                                          save_dir="samples/samples",
-                                         name_tag="test_sample_{}.mid",
+                                         name_tag=name_tag,
                                          #list_of_quarter_length=[int(.5 * qpm) for qpm in qpms],
                                          default_quarter_length=default_quarter_length,
                                          voice_params=voice_type,
@@ -550,9 +555,13 @@ for a in valid_itr:
     pitch_mb = np.cumsum(pitch_mb, axis=0)
     pitch_mb = pitch_mb[ext:]
     dur_mb = dur_mb[ext:]
+    if i < 10:
+        name_tag = "test_quantized_sample_0{}.mid"
+    else:
+        name_tag = "test_quantized_sample_{}.mid"
     pitches_and_durations_to_pretty_midi(pitch_mb, dur_mb,
                                          save_dir="samples/samples",
-                                         name_tag="test_quantized_sample_{}.mid",
+                                         name_tag=name_tag,
                                          #list_of_quarter_length=[int(.5 * qpm) for qpm in qpms],
                                          default_quarter_length=default_quarter_length,
                                          voice_params=voice_type,
@@ -583,7 +592,7 @@ for a in valid_itr:
         end_token = [(0, None)]
         stochastic = True
         diversity_score = "set"
-        beam_width = 15
+        beam_width = 100
         clip = 60
         timeout = 20
         debug = False
@@ -620,26 +629,12 @@ for a in valid_itr:
         final_durs = []
 
         if ni in failed:
-            """
-            # delete all failures here
-            all_files = [fi for fi in os.listdir("samples/samples") if fi.endswith(".mid")]
-            remove_files = []
-            for failed_i in failed:
-                to_remove = ["samples/samples/" + fi for fi in all_files if "sample_{}.mid".format(failed_i) in fi]
-                remove_files.extend(to_remove)
-
-            remove_files = sorted(list(set(remove_files)))
-            for rf in remove_files:
-                print("Removing copycat {}".format(rf))
-                os.remove(rf)
-            """
             # delete here?
             continue
 
         b = final_beams[ni]
         # for all beams, take the sequence (p[0]) and the respective type (ip[0] for pitch, ip[1] for dur)
         # last number (4) for reconstruction to actual data (used 4 voices)
-
         # top 5 beams, :5
         quantized_pitch_seqs = codebook_lookup([np.array([ip[0] for ip in p[0]]).astype("int32") for p in b[:5]], pitch_codebook, 4)
         quantized_dur_seqs = codebook_lookup([np.array([ip[1] for ip in p[0]]).astype("int32") for p in b[:5]], dur_codebook, 4)
@@ -729,7 +724,7 @@ for a in valid_itr:
                 final_q_pitch_mb[:, mi] = 0. * q_pitch_mb[:, mi]
                 final_q_dur_mb[:, mi] = 0. * q_dur_mb[:, mi]
                 copycats.append(mi)
-                print("Sequence {}:{} failed copycat check".format(ni, mi))
+                print("Sequence {}:{} failed weak copycat check".format(ni, mi))
 
         q_pitch_mb = final_q_pitch_mb
         q_dur_mb = final_q_dur_mb
@@ -751,3 +746,14 @@ for a in valid_itr:
             cc_file = path + name_tag.format(cc)
             os.remove(cc_file)
             print("Removed copycat file {}".format(cc_file))
+
+
+final_files = ["samples/samples/" + fi for fi in os.listdir("samples/samples") if fi.endswith(".mid")]
+for ff in final_files:
+    sz = os.path.getsize(ff)
+    if sz == 101:
+        print("Removing file {} of size {}".format(ff, sz))
+        os.remove(ff)
+'''
+
+from IPython import embed; embed(); raise ValueError()
