@@ -20,27 +20,10 @@ except ImportError:
 import json
 import hashlib
 import readline
+import collections
 import uuid
 readline.parse_and_bind('tab: complete')
 readline.parse_and_bind('set editing-mode vi')
-
-def _dumps(arg):
-   # paranoia
-   # http://bugs.python.org/issue770997
-   return pickle.dumps(arg, 1)
-
-
-def get_name():
-    base = str(uuid.uuid4())
-    return base
-
-
-# decided at import, should be consistent over training
-checkpoint_uuid = get_name()[:6]
-def get_checkpoint_uuid():
-    return checkpoint_uuid
-
-
 import copy
 import threading
 import logging
@@ -80,6 +63,18 @@ ch.setFormatter(formatter)
 logger.addHandler(ch)
 
 USER = os.getenv('USER')
+
+
+def _dumps(arg):
+   # paranoia
+   # http://bugs.python.org/issue770997
+   return pickle.dumps(arg, 1)
+
+
+def get_name():
+    base = str(uuid.uuid4())
+    return base
+
 
 def get_logger():
     """
@@ -157,10 +152,276 @@ def _set_finalize_train():
     FINALIZE_TRAINING = True
 
 
+def fetch_checkpoint_dict(list_of_match_strings,
+                          list_of_remote_match_strings=None):
+    """
+    defaults to most recent checkpoint for given match string
+    """
+    lookup_path = get_pthbldr_lookup_dir()
+
+    if not os.path.exists(lookup_path):
+        logger.info("pthbldr lookup folder not found at %s, changing search..." % lookup_path)
+        raise ValueError("Other searches not yet implemented!")
+    else:
+        matches = []
+        for fi in os.listdir(lookup_path):
+            lu_path = os.path.join(lookup_path, fi)
+            if all([ms in lu_path for ms in list_of_match_strings]):
+                matches.append(lu_path)
+
+        if len(matches) == 1:
+            best_match = matches[0]
+        else:
+            # sort by import time
+            import datetime
+            import_times = []
+            for n, m in enumerate(matches):
+                with open(m) as f:
+                    r = json.load(f)
+                import_times.append(r['import_time'])
+
+            def mt(i):
+                # format is year-day-month_hour-minute-second
+                parts = map(int, i.split("_")[1].split("-") + i.split("_")[0].split("-"))
+                day = parts[1]
+                month = parts[2]
+                parts[1] = month
+                parts[2] = day
+                tt = datetime.datetime(*parts)
+                return (tt - datetime.datetime(1970,1,1)).total_seconds()
+
+            import_epoch_times = []
+            for it in import_times:
+                import_epoch_times.append(mt(it))
+
+            sorted_inds = np.argsort(import_epoch_times)[::-1]
+            final_import_times = []
+            final_matches = []
+            for si in sorted_inds:
+                final_import_times.append(import_times[si])
+                final_matches.append(matches[si])
+
+            matches = final_matches
+            import_times = final_import_times
+
+            while True:
+                print("Multiple matches found for %s" % (str(list_of_match_strings)))
+                for n, m in enumerate(matches):
+                    with open(m) as f:
+                       r = json.load(f)
+                    if "extra_info" in r.keys():
+                        if r["extra_info"] != "":
+                            print("%i : %s (%s); %s" % (n, m, r['import_time'], r['extra_info']))
+                        else:
+                            print("%i : %s (%s)" % (n, m, r['import_time']))
+                    elif "extra_info" not in r.keys():
+                        print("%i : %s (%s)" % (n, m, r['import_time']))
+                line = raw_input('Prompt ("0" through "X" select, "e0" through "eX" to edit info, "d0" through "dX" to delete, "Ctrl-C" to quit): ')
+                try:
+                    idx = int(line)
+                    if idx in list(range(len(matches))):
+                        print("Selected index %i : %s" % (idx, matches[idx]))
+                        break
+                except:
+                    cmd = line.strip()
+                    if cmd[0] == "e":
+                        # edit logic
+                        idx = int(cmd[1:])
+                        if idx in list(range(len(matches))):
+                            with open(matches[idx]) as f:
+                                r = json.load(f)
+                            nl = raw_input('Type information to add for extra_info of element {}\n'.format(idx))
+                            if "extra_info" in r.keys():
+                                if r["extra_info"].strip() != "":
+                                    resp = raw_input('Entry has previous information, do you really want to overwrite? (Type y and press enter to confirm)\n')
+                                    resp = resp.strip()
+                                else:
+                                    resp = "y"
+                            else:
+                                resp = "y"
+
+                            if resp != "y":
+                                continue
+                            r["extra_info"] = nl.strip()
+                            with open(matches[idx], 'w') as f:
+                                json.dump(r, f)
+                        print('Editing complete')
+                        continue
+                    elif cmd[0] == "d":
+                        # edit logic
+                        idx = int(cmd[1:])
+                        if idx in list(range(len(matches))):
+                            resp = raw_input('Are you sure you want to delete {}: {}?\n(Type y and press enter to confirm)\n'.format(idx, matches[idx]))
+                            resp = resp.strip()
+                            if resp != "y":
+                                continue
+                            else:
+                                os.remove(matches[idx])
+                                matches = [mi for n, mi in enumerate(matches)
+                                           if n != idx]
+                        print('Deletion complete')
+                        continue
+
+                print('Selection invalid : "%s"' % line)
+                print('Try again!')
+            best_match = matches[idx]
+            # raise ValueError("Multiple matches found! Multiselection not yet implemented")
+
+        info = read_pthbldr_lookup_file(best_match)
+
+        # assumes model dir path matches between local and remote
+        # get the model dir to list on remote
+        model_dir = get_pthbldr_models_dir(verbose=False)
+        if model_dir[-1] != "/":
+            model_dir += "/"
+        local_hostname = socket.gethostname()
+        if local_hostname != info['hostname']:
+            # file is remote
+            res = pe("ssh %s 'ls %s'" % (info['hostname'], model_dir),
+                    shell=True, verbose=False)
+            remote_match_paths = [r for r in res if info['uuid'] in r]
+            if len(remote_match_paths) == 1:
+                remote_path = remote_match_paths[0]
+            else:
+                while True:
+                    print("Multiple matches found for %s on remote %s" % (info['uuid'], info['hostname']))
+                    for n, rmp in enumerate(remote_match_paths):
+                        print("%i : %s" % (n, rmp))
+                    line = raw_input('Prompt ("Ctrl-C" to quit): ')
+                    try:
+                        idx = int(line)
+                        if idx in list(range(len(remote_match_paths))):
+                            print("Selected index %i : %s" % (idx, remote_match_paths[idx]))
+                            break
+                    except:
+                        pass
+                    print('Selection invalid : "%s"' % line)
+                    print('Try again!')
+                remote_path = remote_match_paths[idx]
+                #raise ValueError("Multiple matches found for %s on remote %s, cowardly refusing to do anything" % (info['uuid'], info['hostname']))
+            full_remote_path = model_dir + remote_path
+            lslt = pe("ssh %s 'ls -lt %s'" % (info['hostname'], full_remote_path),
+                      shell=True, verbose=False)
+            pkl_matches = [li for li in lslt if ".pkl" in li]
+            if len(pkl_matches) == 0:
+                raise ValueError("No pkl matches found for %s on remote %s" % (info['uuid'], info['hostname']))
+            # this should handle symlinks as well
+            idx = 0
+            tries = 0
+
+            if list_of_remote_match_strings is not None:
+                extras = [pm for pm in pkl_matches
+                          if all([lrm in pm for lrm in list_of_remote_match_strings])]
+                print('Appending matches %s' % str(extras))
+                pkl_matches = extras + pkl_matches
+
+            while tries < 3:
+                try:
+                    most_recent_pkl = pkl_matches[idx].split(" ")[-1]
+                    if "/" in most_recent_pkl:
+                        final_pkl = most_recent_pkl
+                    else:
+                        if full_remote_path[-1] != "/":
+                            full_remote_path += "/"
+                        final_pkl = full_remote_path + most_recent_pkl
+
+                    local_cache_dir = get_pthbldr_cache_dir()
+                    # rsync cares about "/"
+                    if local_cache_dir[-1] != "/":
+                        local_cache_dir += "/"
+
+                    fname = final_pkl.split("/")[-1]
+                    local_cache = local_cache_dir + fname
+                    cmd_string = "rsync -vh --copy-links --progress %s:%s %s" % (info['hostname'], final_pkl, local_cache)
+                    logger.info("Fetching using fetch command '%s'" % cmd_string)
+
+                    pe(cmd_string, shell=True)
+                    loaded_cd, loaded_model, loaded_optimizer = load_checkpoint(local_cache)
+                    break
+                except EOFError:
+                    idx += 1
+                    tries += 1
+                    logger.info("Tried pkl %s, but it failed. Trying older files..." % fname)
+                    if len(pkl_matches) <= idx:
+                        raise ValueError("Unable to open any pkl checkpoints!")
+            return loaded_cd, loaded_model, loaded_optimizer
+        else:
+            # file is local
+            local_match_paths = [r for r in os.listdir(model_dir)
+                                 if info['uuid'] in r]
+            if len(local_match_paths) == 1:
+                local_path = local_match_paths[0]
+            else:
+                while True:
+                    print("Multiple matches found for %s on local %s" % (info['uuid'], info['hostname']))
+                    for n, rmp in enumerate(local_match_paths):
+                        print("%i : %s" % (n, rmp))
+                    line = raw_input('Prompt ("stop" to quit): ')
+                    try:
+                        idx = int(line)
+                        if idx in list(range(len(local_match_paths))):
+                            print("Selected index %i : %s" % (idx, local_match_paths[idx]))
+                            break
+                    except:
+                        pass
+                    print('Selection invalid : "%s"' % line)
+                    print('Try again!')
+                local_path = local_match_paths[idx]
+                #raise ValueError("Multiple matches found for %s on remote %s, cowardly refusing to do anything" % (info['uuid'], info['hostname']))
+            full_local_path = model_dir + local_path
+            # need time ordering from ls -lt
+            res = pe("ls -lt %s" % full_local_path, shell=True)
+            pkl_matches = [li for li in res if ".pkl" in li]
+            if len(pkl_matches) == 0:
+                raise ValueError("No pkl matches found for %s on remote %s" % (info['uuid'], info['hostname']))
+            # this should handle symlinks as well
+
+            if list_of_remote_match_strings is not None:
+                extras = [pm for pm in pkl_matches
+                          if all([lrm in pm for lrm in list_of_remote_match_strings])]
+                pkl_matches = extras + pkl_matches
+
+            most_recent_pkl = pkl_matches[0].split(" ")[-1]
+            if "/" in most_recent_pkl:
+                final_pkl = most_recent_pkl
+            else:
+                if full_local_path[-1] != "/":
+                    full_local_path += "/"
+                final_pkl = full_local_path + most_recent_pkl
+
+            local_cache_dir = get_pthbldr_cache_dir()
+            # rsync cares about "/"
+            if local_cache_dir[-1] != "/":
+                local_cache_dir += "/"
+
+            fname = final_pkl.split("/")[-1]
+            local_cache = local_cache_dir + fname
+            if info["hostname"] == "localhost":
+                cmd_string = "rsync -vh --copy-links --progress %s %s" % (final_pkl, local_cache)
+            else:
+                cmd_string = "rsync -vh --copy-links --progress %s:%s %s" % (info['hostname'], final_pkl, local_cache)
+            logger.info("Fetching using fetch command '%s'" % cmd_string)
+
+            pe(cmd_string, shell=True)
+            loaded_cd, loaded_model, loaded_optimizer = load_checkpoint(local_cache)
+            return loaded_cd, loaded_model, loaded_optimizer
+
+
 # universal time
 tt = str(time.time()).split(".")[0]
 def get_time_string():
     return tt
+
+
+# decided at import, should be consistent over training
+checkpoint_uuid = get_name()[:6]
+def get_checkpoint_uuid():
+    return checkpoint_uuid
+
+def set_checkpoint_uuid(uuid_str):
+    logger.info("Setting global dagbldr uuid to %s" % uuid_str)
+    global checkpoint_uuid
+    checkpoint_uuid = uuid_str
 
 
 checkpoint_import_time = time.strftime("%H-%M-%S_%Y-%d-%m", time.gmtime())
@@ -169,7 +430,7 @@ def get_checkpoint_import_time():
 
 
 def set_checkpoint_import_time(time_str):
-    logger.info("Setting global dagbldr import time to %s" % time_str)
+    logger.info("Setting global pthbldr import time to %s" % time_str)
     global checkpoint_import_time
     checkpoint_import_time = time_str
 
@@ -231,6 +492,187 @@ def _special_check(verbose=True):
         return True
     else:
         return False
+
+
+def _hash_file(fpath):
+    assert os.path.exists(fpath)
+
+    def md5(fname):
+        hash_md5 = hashlib.md5()
+        with open(fname, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+    return str(md5(fpath))
+
+
+
+def write_pthbldr_lookup_file(script_path=None):
+    gcu = get_checkpoint_uuid()
+    gcit = get_checkpoint_import_time()
+    hostname = socket.gethostname()
+    lookup_path = get_pthbldr_lookup_dir()
+    if script_path is None:
+        script_name = get_script()
+        full_script_path = os.path.abspath(script_name) + ".py"
+    else:
+        # this edge case only for making new lookups. Not recommended
+        script_name = script_path.split(os.sep)[-1][:-3]
+        full_script_path = script_path
+
+    hsh = _hash_file(full_script_path)
+
+    info_dict = {}
+    info_dict["name"] = script_name
+    info_dict["run_path"] = full_script_path
+    info_dict["hostname"] = hostname
+    info_dict["uuid"] = gcu
+    info_dict["import_time"] = gcit
+    info_dict["script_hash"] = hsh
+
+    if not os.path.exists(lookup_path):
+        os.makedirs(lookup_path)
+    save_path = os.path.join(lookup_path, "%s_%s.json" % (gcu, script_name))
+    logger.info("Saving pthbldr lookup in %s" % save_path)
+    with open(save_path, "w") as f:
+        json.dump(info_dict, f)
+
+
+def read_pthbldr_lookup_file(fpath):
+    with open(fpath, "r") as f:
+        info = json.load(f)
+    return info
+
+
+def find_pthbldr_lookup_file(force_match=None, quick_check=False):
+    # side effects, will set the pthbldr global uuid to whatever it finds if
+    # matching!
+    lookup_path = get_pthbldr_lookup_dir()
+
+    if not os.path.exists(lookup_path):
+        logger.info("pthbldr lookup folder not found at %s, creating..." % lookup_path)
+        os.mkdir(lookup_path)
+    if quick_check:
+        return
+
+    # onetime hook to bootstrap for dev
+    # write_pthbldr_lookup_file()
+
+    self_name = get_script()
+    self_full_path = os.path.abspath(self_name) + ".py"
+    self_hash = _hash_file(self_full_path)
+    matches = []
+    for fi in os.listdir(lookup_path):
+        lu_path = os.path.join(lookup_path, fi)
+        res = read_pthbldr_lookup_file(lu_path)
+        if force_match is None:
+            rh = False
+        else:
+            rh = force_match in lu_path
+        if str(res["script_hash"]).strip() == self_hash or rh:
+            logger.info("magic_reload match found at %s, reloading weights and stats" % lu_path)
+            matches.append(res)
+
+    if len(matches) > 1:
+        logger.info("Multiple magic_reload matches found, using most recent")
+        best_offset = 2000000000000000
+        # convert then unconvert to avoid timezone issues
+        current_time = time.strftime("%H-%M-%S_%Y-%d-%m", time.gmtime())
+        current_time = time.strptime(current_time, "%H-%M-%S_%Y-%d-%m")
+        current_time = time.mktime(current_time)
+
+        for n, m in enumerate(matches):
+            # this doesn't account for dst or any other nonsense
+            checkpoint_import_time = time.strptime(m["import_time"], "%H-%M-%S_%Y-%d-%m")
+            ce_time = time.mktime(checkpoint_import_time)
+            offset = abs(current_time - ce_time)
+            if offset < best_offset:
+                best_offset = offset
+                best_match = matches[n]
+    elif len(matches) == 1:
+        best_match = matches[0]
+    else:
+        logger.info("No magic_reload matches found")
+        # 0 matches
+        return None
+    # fetch the matched checkpoint
+    # currently (see filepath maker in archive_dagbldr
+    # name + "_" + time + "_" + uuid
+    checkpoint_dir = get_pthbldr_models_dir()
+
+    cached_machine = best_match["hostname"]
+    cached_name = best_match["name"]
+    cached_runpath = best_match["run_path"]
+    cached_time = best_match["import_time"]
+    cached_uuid = best_match["uuid"]
+    cached_folder = cached_name + "_" + cached_time + "_" + cached_uuid
+    cached_dir = checkpoint_dir
+    cached_path = cached_dir + str(os.sep) + cached_folder
+    if cached_path[-1] != str(os.sep):
+        cached_path += str(os.sep)
+    logger.info("Using best match stored on %s, from %s" % (cached_machine, cached_path))
+
+    # for now use force_latest.pkl
+    to_use = "force_latest.pkl"
+    cached_pkl = cached_path + to_use
+    local_cache_dir = get_pthbldr_cache_dir()
+    local_cache = local_cache_dir + os.sep + "%s_%s" % (cached_uuid, to_use)
+    if cached_machine == "localhost":
+        cmd_string = "rsync -vh --copy-links --progress %s %s" % (cached_pkl, local_cache)
+    else:
+        cmd_string = "rsync -vh --copy-links --progress %s:%s %s" % (cached_machine, cached_pkl, local_cache)
+    logger.info("Fetching using fetch command '%s'" % cmd_string)
+    pe(cmd_string, shell=True)
+    loaded_cd, loaded_model, loaded_optimizer = load_checkpoint(local_cache)
+    set_checkpoint_uuid(cached_uuid)
+    return loaded_cd, loaded_model, loaded_optimizer
+
+
+def get_pthbldr_models_dir(verbose=True):
+    checkpoint_dir = os.getenv("PTHBLDR_MODELS", os.path.join(
+        os.path.expanduser("~"), "pthbldr_models"))
+
+    # Figure out if this is necessary to run on localdisk @ U de M
+    if _special_check(verbose=verbose):
+        checkpoint_dir = "/Tmp/" + USER + "/pthbldr_models"
+    return checkpoint_dir
+
+
+def get_pthbldr_cache_dir(verbose=True):
+    local_cache_dir = os.getenv("PTHBLDR_CACHE", os.path.join(
+        os.path.expanduser("~"), "pthbldr_cache"))
+
+    # Figure out if this is necessary to run on localdisk @ U de M
+    if _special_check(verbose=verbose):
+        local_cache_dir = "/Tmp/" + USER + "/pthbldr_models"
+
+    if not os.path.exists(local_cache_dir):
+        os.mkdir(local_cache_dir)
+    return local_cache_dir
+
+
+def get_pthbldr_lookup_dir():
+    return os.getenv("PTHBLDR_LOOKUP", os.path.join(
+        os.path.expanduser("~"), "pthbldr_lookup"))
+
+
+def get_checkpoint_dir(checkpoint_dir=None, folder=None, create_dir=True):
+    """ Get checkpoint directory path """
+    if checkpoint_dir is None:
+        checkpoint_dir = get_pthbldr_models_dir()
+
+    if folder is None:
+        checkpoint_name = get_script()
+        checkpoint_import_time = get_checkpoint_import_time()
+        checkpoint_uuid = get_checkpoint_uuid()
+        tmp = checkpoint_dir + os.path.sep + checkpoint_name + "_" + checkpoint_import_time  + "_" + checkpoint_uuid
+        checkpoint_dir = tmp
+    else:
+        checkpoint_dir = os.path.join(checkpoint_dir, folder)
+
+    if not os.path.exists(checkpoint_dir) and create_dir:
+        os.makedirs(checkpoint_dir)
+    return checkpoint_dir
 
 
 def in_nosetest():
@@ -616,6 +1058,196 @@ def save_results_as_html(save_path, results_dict, use_resource_dir=True,
     logger.info("Completed HTML results saving %s" % save_path)
 
 
+def create_checkpoint_dict(model, optimizer, magic_reload=False, force_match=None):
+    """
+    Create checkpoint dict that contains all needed pytorch objects to continue training
+
+    Example usage:
+        create_checkpoint_dict(model_instance, optimizer_instance)
+
+    Parameters
+    ----------
+    model : A PyTorch model
+
+    optimizer : A PyTorch optimizer
+
+    magic_reload : bool, default False
+       Whether or not to use "magic reloading", using pthbldr model lookups.
+       This will replace the initialized weights with weights from
+       a previously saved model, either locally or remotely depending on the
+       entries in ~/pthbldr_lookup/*.json.
+
+    force_match : str, default None
+       Substring to force match with, default will do intelligent search based
+       on the name.
+
+    Returns
+    -------
+    checkpoint_dict : dict
+        A checkpoint dictionary suitable for passing to a training loop
+
+    """
+    logger.info("Creating new checkpoint dictionary")
+    checkpoint_dict = collections.OrderedDict()
+    # get imports, the "best" way
+    # get name of main file
+    import __main__
+    full_path_to_script = os.path.abspath(__main__.__file__)
+    with open(full_path_to_script, "r") as f:
+        lines = f.readlines()
+    checkpoint_dict["script_list_string"] = lines
+
+    # this might get super ugly when this function is in the library
+    def print_classes():
+        #is_class_member = lambda member: inspect.isclass(member) and member.__module__ == __name__
+        #clsmembers = inspect.getmembers(sys.modules[__name__], is_class_member)
+        is_class_member = lambda member: inspect.isclass(member) and member.__module__ == "__main__"
+        clsmembers = inspect.getmembers(sys.modules["__main__"], is_class_member)
+        return clsmembers
+
+    all_class_lines = []
+    class_names = print_classes()
+    for cn in class_names:
+        class_source = inspect.getsourcelines(cn[1])[0]
+        all_class_lines.append("".join(class_source))
+    checkpoint_dict["model_strings"] = all_class_lines
+    #  pickle pre and post to string? hack city
+    checkpoint_dict["post"] = collections.OrderedDict()
+    checkpoint_dict["post"]["model"] = model
+    checkpoint_dict["post"]["optimizer"] = optimizer
+
+    if magic_reload:
+        reload_cd, reload_model, reload_optimizer = find_pthbldr_lookup_file(force_match=force_match)
+        old_keys = checkpoint_dict.keys()
+        replaced = []
+        for k, v in reload_cd.items():
+            replaced.append(k)
+            checkpoint_dict[k] = v
+        del reload_cd
+        for k in old_keys:
+            if k not in replaced:
+                raise ValueError("Key {} not replaced in magic reload!".format(k))
+        return checkpoint_dict, reload_model, reload_optimizer
+    else:
+        return checkpoint_dict, model, optimizer
+
+
+def save_checkpoint(save_path, checkpoint_dict, use_resource_dir=True,
+                    latest_tag=None):
+    if use_resource_dir:
+        save_path = os.path.join(get_checkpoint_dir(), save_path)
+    sys.setrecursionlimit(40000)
+    logger.info("Saving checkpoint to %s" % save_path)
+    start_time = time.time()
+
+    assert "model_strings" in checkpoint_dict
+    assert "post" in checkpoint_dict
+
+    new_checkpoint_dict = collections.OrderedDict()
+    if hasattr(checkpoint_dict["post"], "keys"):
+        new_checkpoint_dict["post"] = pickle.dumps(checkpoint_dict["post"])
+    else:
+        new_checkpoint_dict["post"] = checkpoint_dict["post"]
+    for k in checkpoint_dict.keys():
+        if k != "post":
+            new_checkpoint_dict[k] = checkpoint_dict[k]
+    # saver
+    with open(save_path, "w") as f:
+        pickle.dump(new_checkpoint_dict, f)
+
+    if latest_tag is not None:
+        latest_path = os.path.join(get_checkpoint_dir(),
+                                   latest_tag + "_latest.pkl")
+        if os.path.exists(latest_path):
+            os.remove(latest_path)
+        os.symlink(save_path, latest_path)
+    logger.info("Checkpoint saving complete %s" % save_path)
+    logger.info("Time to checkpoint %s seconds" % str(time.time() - start_time))
+
+
+def load_checkpoint(filename):
+    # this is a dangerous function
+    import __main__
+    with open(filename, "rb") as f:
+        checkpoint_dict = pickle.load(f)
+    lines = checkpoint_dict["script_list_string"]
+    ll = [l for l in lines if "import" in l]
+    for lli in ll:
+        exec(lli.lstrip())
+        if "as" in lli:
+            name_part = lli.split("as")[-1]
+            if "," in name_part or ";" in name_part:
+                raise ValueError("Handle multiple")
+            name = name_part.lstrip().rstrip()
+            globals()[name] = eval(name)
+            setattr(__main__, name, eval(name))
+        else:
+            name_part = lli.split("import")[-1]
+            if "#" in lli and "#" not in name_part:
+                continue
+            else:
+                name_part = name_part.split("#")[0]
+            if "," in name_part or ";" in name_part:
+                if "," in name_part:
+                    name_part = name_part.lstrip().rstrip()
+                    all_parts = name_part.split(",")
+                    all_parts = [a.lstrip().rstrip() for a in all_parts]
+                    for ap in all_parts:
+                        globals()[ap] = eval(ap)
+                        setattr(__main__, ap, eval(ap))
+                else:
+                    raise ValueError("Handle multiple")
+            else:
+                name = name_part.lstrip().rstrip()
+                globals()[name] = eval(name)
+                setattr(__main__, name, eval(name))
+
+    # double loop to try and get everything evaluated
+    for ms in checkpoint_dict["model_strings"]:
+        name = ms.split("\n")[0].split(" ")[-1].split("(")[0]
+        try:
+            exec(ms)
+        except:
+            continue
+        setattr(__main__, name, eval(name))
+
+    for ms in checkpoint_dict["model_strings"]:
+        name = ms.split("\n")[0].split(" ")[-1].split("(")[0]
+        try:
+            exec(ms)
+        except:
+            print("ERROR: Still can't init {}".format(name))
+            continue
+        setattr(__main__, name, eval(name))
+    post_dict = pickle.loads(checkpoint_dict["post"])
+    return checkpoint_dict, post_dict["model"], post_dict["optimizer"]
+
+
+def save_weights(save_path, items_dict, use_resource_dir=True,
+                 latest_tag=None):
+    logger.info("Not saving weights due to copy issues in npz")
+    return
+    weights_dict = {}
+    # k is the function name, v is a theano function
+    for k, v in items_dict.items():
+        if isinstance(v, theano.compile.function_module.Function):
+            # w is all the numpy values from a function
+            w = get_values_from_function(v)
+            for n, w_v in enumerate(w):
+                weights_dict[k + "_%i" % n] = w_v
+    if use_resource_dir:
+        # Assume it ends with .py ...
+        script_name = get_script_name()[:-3]
+        save_path = os.path.join(get_checkpoint_dir(), save_path)
+    logger.info("Saving weights to %s" % save_weights_path)
+    if len(weights_dict.keys()) > 0:
+        np.savez(save_path, **weights_dict)
+    else:
+        logger.info("Possible BUG: no theano functions found in items_dict, "
+              "unable to save weights!")
+    logger.info("Weight saving complete %s" % save_path)
+
+
 @coroutine
 def threaded_timed_writer(sleep_time=15 * 60, tag=None):
     """
@@ -675,7 +1307,6 @@ def threaded_timed_writer(sleep_time=15 * 60, tag=None):
                             save_weights(weights_save_path, items_dict,
                                          latest_tag=tag)
                         if checkpoint_tup is not None:
-                            logging.info("Unable to save checkpoint, NYI")
                             checkpoint_save_path, pickle_item = checkpoint_tup
                             save_checkpoint(checkpoint_save_path, pickle_item,
                                             latest_tag=tag)
@@ -815,7 +1446,7 @@ def run_loop(train_loop_function, train_itr,
     """
     TODO: add upload fields to add data to an html and save a copy?
     """
-    ignore_keys = []
+    ignore_keys = ["script_list_string", "model_strings", "post"]
 
     train_loop = train_loop_function
     valid_loop = valid_loop_function
@@ -825,6 +1456,7 @@ def run_loop(train_loop_function, train_itr,
 
     non_ignored_keys = [k for k in checkpoint_dict.keys()
                         if k not in ignore_keys]
+
     if len(non_ignored_keys) > 0:
         overall_train_costs = checkpoint_dict["train_costs"]
         overall_valid_costs = checkpoint_dict["valid_costs"]
@@ -978,9 +1610,9 @@ def run_loop(train_loop_function, train_itr,
                         results_save_path = "%s_model_update_results_%i.html" % (ident, train_mb_count)
                         # Use pickle to preserve relationships between keys
                         # while still copying buffers
-                        #copy_pickle = _dumps(checkpoint_dict)
-                        #copy_dict = pickle.loads(copy_pickle)
-                        #del copy_pickle
+                        copy_pickle = _dumps(checkpoint_dict)
+                        copy_dict = pickle.loads(copy_pickle)
+                        del copy_pickle
 
                         logger.info("Update checkpoint after train mb %i" % train_mb_count)
                         logger.info("Current mean cost %f" % np.mean(partial_train_costs))
@@ -996,10 +1628,8 @@ def run_loop(train_loop_function, train_itr,
                         objective = running_train_mean[-1]
                         tcw.send((objective,
                                  (results_save_path, this_results_dict),
-                                 None,
-                                 None))
-                                 #(weights_save_path, copy_dict),
-                                 #(checkpoint_save_path, copy_dict)))
+                                 (weights_save_path, copy_dict),
+                                 (checkpoint_save_path, copy_dict)))
 
                     elif (time.time() - last_time_checkpoint) >= checkpoint_every_n_seconds:
                         print("")
@@ -1011,9 +1641,9 @@ def run_loop(train_loop_function, train_itr,
                         results_save_path = "%s_model_time_results_%i.html" % (ident, int(time_diff))
                         # Use pickle to preserve relationships between keys
                         # while still copying buffers
-                        #copy_pickle = _dumps(checkpoint_dict)
-                        #copy_dict = pickle.loads(copy_pickle)
-                        #del copy_pickle
+                        copy_pickle = _dumps(checkpoint_dict)
+                        copy_dict = pickle.loads(copy_pickle)
+                        del copy_pickle
 
                         logger.info("Time checkpoint after train mb %i" % train_mb_count)
                         logger.info("Current mean cost %f" % np.mean(partial_train_costs))
@@ -1028,11 +1658,9 @@ def run_loop(train_loop_function, train_itr,
                         objective = running_train_mean[-1]
                         tcw.send((objective,
                                  (results_save_path, this_results_dict),
-                                 None,
-                                 None))
-                                 #(weights_save_path, copy_dict),
-                                 #(checkpoint_save_path, copy_dict)))
-                        #del copy_dict
+                                 (weights_save_path, copy_dict),
+                                 (checkpoint_save_path, copy_dict)))
+                        del copy_dict
                     draw = random_state.rand()
                     if draw < monitor_prob and not skip_intermediates:
                         print("")
@@ -1294,18 +1922,16 @@ def run_loop(train_loop_function, train_itr,
                     checkpoint_save_path = "%s_model_checkpoint_valid_%i.pkl" % (ident, e_i)
                     weights_save_path = "%s_model_weights_valid_%i.npz" % (ident, e_i)
                     results_save_path = "%s_model_results_valid_%i.html" % (ident, e_i)
-                    #best_valid_checkpoint_pickle = _dumps(checkpoint_dict)
-                    #best_valid_checkpoint_epoch = e
+                    best_valid_checkpoint_pickle = _dumps(checkpoint_dict)
+                    best_valid_checkpoint_epoch = e
                     # preserve key relations
-                    #copy_dict = pickle.loads(best_valid_checkpoint_pickle)
+                    copy_dict = pickle.loads(best_valid_checkpoint_pickle)
 
                     objective = mean_epoch_valid_cost
                     vcw.send((objective,
                              (results_save_path, this_results_dict),
-                             None,
-                             None))
-                             #(weights_save_path, copy_dict),
-                             #(checkpoint_save_path, copy_dict)))
+                             (weights_save_path, copy_dict),
+                             (checkpoint_save_path, copy_dict)))
 
                     if mean_epoch_train_cost < old_min_train_cost:
                         checkpoint_save_path = "%s_model_checkpoint_train_%i.pkl" % (ident, e_i)
@@ -1317,28 +1943,24 @@ def run_loop(train_loop_function, train_itr,
                         objective = mean_epoch_train_cost
                         vcw.send((objective,
                                 (results_save_path, this_results_dict),
-                                None,
-                                None))
-                                #(weights_save_path, copy_dict),
-                                #(checkpoint_save_path, copy_dict)))
+                                (weights_save_path, copy_dict),
+                                (checkpoint_save_path, copy_dict)))
                     logger.info("Valid checkpointing complete.")
                 elif mean_epoch_train_cost < old_min_train_cost:
                     logger.info("Checkpointing train...")
                     checkpoint_save_path = "%s_model_checkpoint_train_%i.pkl" % (ident, e_i)
                     weights_save_path = "%s_model_weights_train_%i.npz" % (ident, e_i)
                     results_save_path = "%s_model_results_train_%i.html" % (ident, e_i)
-                    #best_train_checkpoint_pickle = _dumps(checkpoint_dict)
-                    #best_train_checkpoint_epoch = e
+                    best_train_checkpoint_pickle = _dumps(checkpoint_dict)
+                    best_train_checkpoint_epoch = e
                     # preserve key relations
-                    #copy_dict = pickle.loads(best_train_checkpoint_pickle)
+                    copy_dict = pickle.loads(best_train_checkpoint_pickle)
 
                     objective = mean_epoch_train_cost
                     vcw.send((objective,
                             (results_save_path, this_results_dict),
-                            None,
-                            None))
-                            #(weights_save_path, copy_dict),
-                            #(checkpoint_save_path, copy_dict)))
+                            (weights_save_path, copy_dict),
+                            (checkpoint_save_path, copy_dict)))
                     logger.info("Train checkpointing complete.")
 
                 if e < checkpoint_delay:
@@ -1352,19 +1974,17 @@ def run_loop(train_loop_function, train_itr,
                     results_save_path = "%s_model_results_%i.html" % (ident, e_i)
                     # Use pickle to preserve relationships between keys
                     # while still copying buffers
-                    #copy_pickle = _dumps(checkpoint_dict)
-                    #copy_dict = pickle.loads(copy_pickle)
+                    copy_pickle = _dumps(checkpoint_dict)
+                    copy_dict = pickle.loads(copy_pickle)
 
                     objective = mean_epoch_train_cost
                     fcw.send((objective,
                             (results_save_path, this_results_dict),
-                            None,
-                            None))
-                            #(weights_save_path, copy_dict),
-                            #(checkpoint_save_path, copy_dict)))
+                            (weights_save_path, copy_dict),
+                            (checkpoint_save_path, copy_dict)))
                     # TODO: Make this better at handling time vs forced
                     # using somehting besides hardcoded force_latest.pkl
-                    #write_dagbldr_lookup_file()
+                    write_pthbldr_lookup_file()
                     logger.info("Force checkpointing complete.")
 
                 checkpoint_stop = time.time()
@@ -1423,10 +2043,8 @@ def run_loop(train_loop_function, train_itr,
         objective = -np.inf
         fcw.send((objective,
                  (results_save_path, best_train_results_dict),
-                 None,
-                 None))
-                 #(weights_save_path, best_train_checkpoint_dict),
-                 #(checkpoint_save_path, best_train_checkpoint_dict)))
+                 (weights_save_path, best_train_checkpoint_dict),
+                 (checkpoint_save_path, best_train_checkpoint_dict)))
 
     logger.info("Loop finished, closing write threads (this may take a while!)")
     # set FINALIZE_TRAINING so that write threads know it is time to close
