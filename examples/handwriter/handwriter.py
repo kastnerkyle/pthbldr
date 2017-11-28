@@ -288,6 +288,29 @@ class Model(nn.Module):
         self.loutp2 = GLinear(self.n_hid, self.n_density)
         self.loutp3 = GLinear(self.n_hid, self.n_density)
         self.poutp = GLinear(self.n_density, self.n_density)
+        for m in self.modules():
+            if isinstance(m, GLinear):
+                sz = m.linear.weight.size()
+                m.linear.weight.data = th_normal((sz[0], sz[1]))
+                m.linear.bias.data.zero_()
+            """
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+            elif isinstance(m, nn.Linear):
+                m.bias.data.zero_()        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+            elif isinstance(m, nn.Linear):
+                m.bias.data.zero_()
+            """
 
     def _slice_outs(self, outs, corr_scale=0.99):
         k = self.n_components
@@ -396,6 +419,7 @@ class BernoulliAndBivariateGMM(nn.Module):
         normalizer = 1. / (2. * 3.14159 * sigma1 * sigma2 * th.sqrt(1. - corr ** 2))
         Z1 = ((t1 - mu1) / sigma1) ** 2
         Z2 = ((t2 - mu2) / sigma2) ** 2
+        zz = (t1 - mu1) / sigma1 * (t2 - mu2) / sigma2
         # expansion of Z12
         pp1 = 2 * corr * t1 * t2
         pp2 = -2 * corr * mu1 * t2
@@ -404,16 +428,15 @@ class BernoulliAndBivariateGMM(nn.Module):
         denom = 2 * (1. - corr ** 2) / (sigma1 * sigma2)
         Z12 = pp1 * denom + pp2 * denom + pp3 * denom + pp4 * denom
 
-        part = th.exp(-Z1) * th.exp(-Z2)
-        zm = Z12.max().expand_as(Z12)
-        tt = th.exp(Z12 - Z12.max().expand_as(Z12))
-        full = part * tt / zm
-
-        gprob = normalizer * full
-        fgprob = gprob + self.epsilon
+        Z = -Z1 - Z2 + Z12
+        log_gprob = th.log(normalizer) + Z
         fcoeff = coeff + self.epsilon
-        fgprob = fgprob / fgprob.sum(dim=2).expand_as(gprob)
         fcoeff = fcoeff / fcoeff.sum(dim=2).expand_as(coeff)
+        # a bit silly but it works... maybe a way to do the smoothing in logspace directly
+        gprob = th.exp(log_gprob)
+        gprob = gprob + self.epsilon
+        gprob = gprob / gprob.sum(dim=2).expand_as(gprob)
+        log_gprob = th.log(gprob)
 
         """
         # original
@@ -426,10 +449,7 @@ class BernoulliAndBivariateGMM(nn.Module):
         # Thanks to DWF https://gist.github.com/dwf/b2e1d8d575cb9e7365f302c90d909893
         a, t = binary, t0
         c_b = th.sum(t * F.softplus(-a) + (1. - t) * F.softplus(a), dim=2)
-        #c_b = th.sum(t0 * th.log(binary) + (1. - t0) * th.log(1. - binary), dim=2)
-
-
-        nll1 = -th.log((fcoeff * fgprob).sum(dim=2)[:, :, 0])
+        nll1 = logsumexp(th.log(fcoeff) + log_gprob, dim=2)[:, :, 0]
         nll2 = c_b
         nll = nll1 - nll2
         return nll
@@ -552,8 +572,8 @@ def train_loop(itr, extra):
         att_gru_init = Variable(hiddens[0][-1].cpu().data)
         dec_gru1_init = Variable(hiddens[1][-1].cpu().data)
         dec_gru2_init = Variable(hiddens[2][-1].cpu().data)
-        print("Part:", total_loss / float(total_count))
-    print("Final:", total_loss / float(total_count))
+        #print("Part:", total_loss / float(total_count))
+    #print("Final:", total_loss / float(total_count))
     return [total_loss / float(total_count)]
 
 def valid_loop(itr, extra):
