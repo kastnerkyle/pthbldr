@@ -28,9 +28,9 @@ pen_trace = np.array([x.astype(floatX) for x in X])
 chars = np.array([yy.astype(floatX) for yy in y])
 
 minibatch_size = 50
-n_epochs = 100  # Used way at the bottom in the training loop!
+n_epochs = 3  # Used way at the bottom in the training loop!
 cut_len = 300  # Used way at the bottom in the training loop!
-learning_rate = 1E-4
+learning_rate = 1E-5
 random_state = np.random.RandomState(1999)
 
 train_itr = list_iterator([pen_trace, chars], minibatch_size, axis=1, stop_index=10000,
@@ -49,7 +49,7 @@ n_chars = vocabulary_size
 n_out = 3
 n_in = n_chars
 
-use_cuda = th.cuda.is_available()
+use_cuda = True
 
 # try to get deterministic runs
 th.manual_seed(1999)
@@ -222,7 +222,7 @@ class GaussianAttention(nn.Module):
         return [h_i, k_i]
 
 
-def softmax(inp, axis=1):
+def softmax(inp, eps=1E-6, axis=1):
     # https://discuss.pytorch.org/t/why-softmax-function-cant-specify-the-dimension-to-operate/2637
     input_size = inp.size()
 
@@ -231,6 +231,8 @@ def softmax(inp, axis=1):
 
     input_2d = trans_input.contiguous().view(-1, trans_size[-1])
 
+    #ee = th.exp(input_2d - th.max(input_2d).expand_as(input_2d))
+    #soft_max_2d = ee / th.sum(ee + eps).expand_as(ee)
     soft_max_2d = F.softmax(input_2d)
 
     soft_max_nd = soft_max_2d.view(*trans_size)
@@ -285,19 +287,22 @@ class Model(nn.Module):
         self.loutp1 = GLinear(self.n_hid, self.n_density)
         self.loutp2 = GLinear(self.n_hid, self.n_density)
         self.loutp3 = GLinear(self.n_hid, self.n_density)
+        self.poutp = GLinear(self.n_density, self.n_density)
 
-    def _slice_outs(self, outs):
+    def _slice_outs(self, outs, corr_scale=0.99):
         k = self.n_components
         mu = outs[..., 0:2*k]
         sigma = outs[..., 2*k:4*k]
         corr = outs[..., 4*k:5*k]
         coeff = outs[..., 5*k:6*k]
         binary = outs[..., 6*k:]
-        sigma = th.exp(sigma - bias - th.max(sigma).expand_as(sigma)) + 1E-6
+        #binary = th.sigmoid(binary)
+        sigma = F.softplus(sigma) + 1E-4
+        #sigma = th.exp(sigma.clamp(-10., 3.)) + 1E-4
         # constant offset of 1 to set starting corr to 0?
-        corr = th.tanh(corr)
-        coeff = softmax(coeff * (1. + bias)) + 1E-6
-        binary = th.sigmoid(binary * (1. + bias))
+        # scale it
+        corr = th.tanh(corr) * corr_scale
+        coeff = softmax(coeff)
         mu = mu.contiguous().view(mu.size()[:-1] + (2, self.n_components))
         sigma = sigma.contiguous().view(sigma.size()[:-1] + (2, self.n_components))
         return mu, sigma, corr, coeff, binary
@@ -350,7 +355,8 @@ class Model(nn.Module):
             hiddens[1][i] = hiddens[1][i] + self.l2._slice(h2_t, 0)
             hiddens[2][i] = hiddens[2][i] + self.l3._slice(h3_t, 0)
         output = self.loutp1(hiddens[0]) + self.loutp2(hiddens[1]) + self.loutp3(hiddens[2])
-        mu, sigma, corr, coeff, binary = self._slice_outs(output)
+        poutput = self.poutp(output)
+        mu, sigma, corr, coeff, binary = self._slice_outs(poutput)
         return [mu, sigma, corr, coeff, binary] + hiddens + [att_w, att_k]
 
     def create_inits(self):
@@ -367,41 +373,69 @@ def logsumexp(inputs, dim=None):
 
 # https://discuss.pytorch.org/t/build-your-own-loss-function-in-pytorch/235/18
 class BernoulliAndBivariateGMM(nn.Module):
-    def __init__(self, epsilon=1E-5):
+    def __init__(self, epsilon=1E-6, exp_clamp_lim=20):
         super(BernoulliAndBivariateGMM, self).__init__()
         self.epsilon = epsilon
+        self.exp_clamp_lim = exp_clamp_lim
 
     def forward(self, true, mu, sigma, corr, coeff, binary):
+        # true is L, B, 3
+        # mu is output of linear
+        # sigma is output of softplus / exp
+        # corr is output of tanh
+        # coeff is output of softmax
+        # binary is output of linear (logit)
         mu1 = mu[:, :, 0, :]
         mu2 = mu[:, :, 1, :]
         sigma1 = sigma[:, :, 0, :]
         sigma2 = sigma[:, :, 1, :]
-
-        binary = (binary + self.epsilon) * (1. - 2. * self.epsilon)
-
-        inner1 = (0.5 * th.log(1. - corr ** 2 + self.epsilon))
-        inner1 += th.log(sigma1) + th.log(sigma2)
-        tt = th.log(Variable(th.FloatTensor([2. * np.pi])).expand_as(inner1))
-        if use_cuda:
-            tt = tt.cuda()
-        inner1 += tt
-
         t0 = true[:, :, 0][:, :, None]
         t1 = true[:, :, 1][:, :, None].expand_as(mu1)
         t2 = true[:, :, 2][:, :, None].expand_as(mu2)
 
-        Z = (((t1 - mu1) / sigma1) ** 2) + (((t2 - mu2) / sigma2) ** 2)
-        Z -= (2. * (corr * (t1 - mu1)*(t2 - mu2)) / (sigma1 * sigma2))
+        normalizer = 1. / (2. * 3.14159 * sigma1 * sigma2 * th.sqrt(1. - corr ** 2))
+        Z1 = ((t1 - mu1) / sigma1) ** 2
+        Z2 = ((t2 - mu2) / sigma2) ** 2
+        # expansion of Z12
+        pp1 = 2 * corr * t1 * t2
+        pp2 = -2 * corr * mu1 * t2
+        pp3 = -2 * corr * mu2 * t1
+        pp4 = 2 * corr * mu1 * mu2
+        denom = 2 * (1. - corr ** 2) / (sigma1 * sigma2)
+        Z12 = pp1 * denom + pp2 * denom + pp3 * denom + pp4 * denom
+
+        part = th.exp(-Z1) * th.exp(-Z2)
+        zm = Z12.max().expand_as(Z12)
+        tt = th.exp(Z12 - Z12.max().expand_as(Z12))
+        full = part * tt / zm
+
+        gprob = normalizer * full
+        fgprob = gprob + self.epsilon
+        fcoeff = coeff + self.epsilon
+        fgprob = fgprob / fgprob.sum(dim=2).expand_as(gprob)
+        fcoeff = fcoeff / fcoeff.sum(dim=2).expand_as(coeff)
+
+        """
+        # original
+        # naturally, this is blowing UP!
+        Z1 = (((t1 - mu1) / sigma1) ** 2) + (((t2 - mu2) / sigma2) ** 2)
+        Z = Z1 - (2. * (corr * (t1 - mu1) * (t2 - mu2)) / (sigma1 * sigma2))
         inner2 = 0.5 * (1. / (1. - corr ** 2 + self.epsilon))
         cost = -(inner1 + (inner2 * Z))
+        """
+        # Thanks to DWF https://gist.github.com/dwf/b2e1d8d575cb9e7365f302c90d909893
+        a, t = binary, t0
+        c_b = th.sum(t * F.softplus(-a) + (1. - t) * F.softplus(a), dim=2)
+        #c_b = th.sum(t0 * th.log(binary) + (1. - t0) * th.log(1. - binary), dim=2)
 
-        c_b = th.sum(t0 * th.log(binary) + (1. - t0) * th.log(1. - binary), dim=2)
 
-        nll = -logsumexp(th.log(coeff) + cost, dim=2)[:, :, 0]
-        nll -= c_b
+        nll1 = -th.log((fcoeff * fgprob).sum(dim=2)[:, :, 0])
+        nll2 = c_b
+        nll = nll1 - nll2
         return nll
 
 model = Model()
+
 optimizer = th.optim.Adam(model.parameters(), lr=learning_rate)
 loss_function = BernoulliAndBivariateGMM()
 
@@ -462,10 +496,10 @@ def train_loop(itr, extra):
     if (len(inp_mb) % cut_len) == 0:
         cuts = cuts - 1
 
-
     # reset the model
     model.zero_grad()
 
+    total_count = 0
     total_loss = 0
     inits = [Variable(i) for i in model.create_inits()]
     att_gru_init = inits[0]
@@ -473,8 +507,10 @@ def train_loop(itr, extra):
     dec_gru1_init = inits[2]
     dec_gru2_init = inits[3]
     for cut_i in range(cuts):
+        model.zero_grad()
         cinp_mb_v = Variable(th.LongTensor(cinp_mb))
-        inp_mb_v = Variable(th.FloatTensor(inp_mb[cut_i * cut_len:(cut_i + 1) * cut_len]))
+        inp_mb_sub = inp_mb[cut_i * cut_len:(cut_i + 1) * cut_len]
+        inp_mb_v = Variable(th.FloatTensor(inp_mb_sub))
 
         if use_cuda:
             inp_mb_v = inp_mb_v.cuda()
@@ -487,28 +523,38 @@ def train_loop(itr, extra):
         o = model(cinp_mb_v, inp_mb_v,
                   att_gru_init, att_k_init, dec_gru1_init, dec_gru2_init)
         mu, sigma, corr, coeff, binary = o[:5]
+
         att_w, att_k = o[-2:]
         hiddens = o[5:-2]
-        l_full = loss_function(inp_mb_v, mu, sigma, corr, coeff, binary)
+        mu = mu[1:]
+        sigma = sigma[1:]
+        corr = corr[1:]
+        coeff = coeff[1:]
+        binary = binary[1:]
+        target = inp_mb_v[:-1]
+        l_full = loss_function(target, mu, sigma, corr, coeff, binary)
         # sum / mask once adding mask
         l = l_full.mean()
         #l.backward()
         # ???? why retain_variables... TBPTT?
-        l.backward(retain_variables=True)
-        clip_gradient(model, 10.)
+        l.backward(retain_variables=False)
         optimizer.step()
-        total_loss = total_loss + l.cpu().data[0]
+        clip_gradient(model, 10.)
+        total_count += len(inp_mb_sub)
+        total_loss = total_loss + l.cpu().data[0] * len(inp_mb_sub)
 
         # setup next inits for TBPTT
         #att_k_init = Variable(att_k[-1])
         #att_gru_init = Variable(hiddens[0][-1])
         #dec_gru1_init = Variable(hiddens[1][-1])
         #dec_gru2_init = Variable(hiddens[2][-1])
-        att_k_init = att_k[-1]
-        att_gru_init = hiddens[0][-1]
-        dec_gru1_init = hiddens[1][-1]
-        dec_gru2_init = hiddens[2][-1]
-    return [total_loss]
+        att_k_init = Variable(att_k[-1].cpu().data)
+        att_gru_init = Variable(hiddens[0][-1].cpu().data)
+        dec_gru1_init = Variable(hiddens[1][-1].cpu().data)
+        dec_gru2_init = Variable(hiddens[2][-1].cpu().data)
+        print("Part:", total_loss / float(total_count))
+    print("Final:", total_loss / float(total_count))
+    return [total_loss / float(total_count)]
 
 def valid_loop(itr, extra):
     mb, mb_mask, c_mb, c_mb_mask = next(itr)
@@ -520,11 +566,11 @@ def valid_loop(itr, extra):
     if (len(inp_mb) % cut_len) == 0:
         cuts = cuts - 1
 
-
     # reset the model
     model.zero_grad()
 
     total_loss = 0
+    total_count = 0
     inits = [Variable(i) for i in model.create_inits()]
     att_gru_init = inits[0]
     att_k_init = inits[1]
@@ -532,7 +578,8 @@ def valid_loop(itr, extra):
     dec_gru2_init = inits[3]
     for cut_i in range(cuts):
         cinp_mb_v = Variable(th.LongTensor(cinp_mb))
-        inp_mb_v = Variable(th.FloatTensor(inp_mb[cut_i * cut_len:(cut_i + 1) * cut_len]))
+        inp_mb_sub = inp_mb[cut_i * cut_len:(cut_i + 1) * cut_len]
+        inp_mb_v = Variable(th.FloatTensor(inp_mb_sub))
 
         if use_cuda:
             inp_mb_v = inp_mb_v.cuda()
@@ -552,7 +599,8 @@ def valid_loop(itr, extra):
         l = l_full.mean()
         #l.backward()
         # ???? why retain_variables... TBPTT?
-        total_loss = total_loss + l.cpu().data[0]
+        total_count += len(inp_mb_sub)
+        total_loss = total_loss + l.cpu().data[0] * len(inp_mb_sub)
 
         # setup next inits for TBPTT
         #att_k_init = Variable(att_k[-1])
@@ -563,7 +611,9 @@ def valid_loop(itr, extra):
         att_gru_init = hiddens[0][-1]
         dec_gru1_init = hiddens[1][-1]
         dec_gru2_init = hiddens[2][-1]
-    return [total_loss]
+        #print("Part:", total_loss / float(total_count))
+    #print("Final:", total_loss / float(total_count))
+    return [total_loss / float(total_count)]
 
 
 checkpoint_dict, model, optimizer = create_checkpoint_dict(model, optimizer)
