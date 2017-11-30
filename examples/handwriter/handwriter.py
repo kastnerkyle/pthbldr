@@ -485,9 +485,9 @@ class BernoulliAndBivariateGMM(nn.Module):
         #print("pre_log_gprob: {}:{}".format(log_gprob.cpu().min().data[0], log_gprob.cpu().max().data[0]))
         fcoeff = coeff + self.epsilon
         fcoeff = fcoeff / fcoeff.sum(dim=2).expand_as(coeff)
-        fgprob = th.exp(log_gprob) + self.epsilon
-        fgprob = fgprob / fgprob.sum(dim=2).expand_as(fgprob)
-        log_gprob = th.log(fgprob)
+        #fgprob = th.exp(log_gprob) + self.epsilon
+        #fgprob = fgprob / fgprob.sum(dim=2).expand_as(fgprob)
+        #log_gprob = th.log(fgprob)
         #print("post_log_gprob: {}:{}".format(log_gprob.cpu().min().data[0], log_gprob.cpu().max().data[0]))
 
         """
