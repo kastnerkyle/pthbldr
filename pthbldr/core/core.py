@@ -644,7 +644,7 @@ def get_pthbldr_cache_dir(verbose=True):
 
     # Figure out if this is necessary to run on localdisk @ U de M
     if _special_check(verbose=verbose):
-        local_cache_dir = "/Tmp/" + USER + "/pthbldr_models"
+        local_cache_dir = "/Tmp/" + USER + "/pthbldr_cache"
 
     if not os.path.exists(local_cache_dir):
         os.mkdir(local_cache_dir)
@@ -1177,7 +1177,20 @@ def load_checkpoint(filename):
         if "as" in lli:
             name_part = lli.split("as")[-1]
             if "," in name_part or ";" in name_part:
-                raise ValueError("Handle multiple")
+                if "as" not in name_part:
+                    assert "import" in name_part
+                    assert ";" not in name_part
+                    names_list = name_part.split(",")
+                    names_list[0] = names_list[0].lstrip().rstrip()
+                    assert "import" in names_list[0]
+                    names_list[0] = names_list[0][len("import "):]
+                    for i, nl in enumerate(names_list):
+                        names_list[i] = names_list[i].lstrip().rstrip()
+                        globals()[name] = eval(name)
+                        setattr(__main__, name, eval(name))
+                    continue
+                else:
+                    raise ValueError("Handle multiple")
             name = name_part.lstrip().rstrip()
             globals()[name] = eval(name)
             setattr(__main__, name, eval(name))
