@@ -17,6 +17,7 @@ import operator
 from pthbldr import floatX, intX
 from pthbldr import TrainingLoop
 from pthbldr import create_checkpoint_dict
+from pthbldr import get_cuda, set_cuda
 
 from extras import fetch_iamondb, list_iterator
 
@@ -27,6 +28,8 @@ vocabulary = iamondb["vocabulary"]
 vocabulary_size = iamondb["vocabulary_size"]
 pen_trace = np.array([x.astype(floatX) for x in X])
 chars = np.array([yy.astype(floatX) for yy in y])
+
+set_cuda(True)
 
 minibatch_size = 50
 n_epochs = 100  # Used way at the bottom in the training loop!
@@ -49,8 +52,6 @@ bias = 0.
 n_chars = vocabulary_size
 n_out = 3
 n_in = n_chars
-
-use_cuda = True
 
 # try to get deterministic runs
 th.manual_seed(1999)
@@ -149,7 +150,7 @@ class GGRUCell(nn.Module):
 
     def create_inits(self):
         h_i = th.zeros(self.minibatch_size, self.hidden_size)
-        if use_cuda:
+        if get_cuda():
             h_i = h_i.cuda()
         return h_i
 
@@ -203,7 +204,7 @@ class GaussianAttentionCell(nn.Module):
         # otherwise this is junk
 
         u = Variable(th.FloatTensor(th.arange(0, cts)))[None, None, :]
-        if use_cuda:
+        if get_cuda():
             u = u.cuda()
             k_tm1 = att_k_tm1.cuda()
             h_tm1 = gru_h_tm1.cuda()
@@ -226,7 +227,7 @@ class GaussianAttentionCell(nn.Module):
         if self.cell_type == "GRU":
             h_i = self.cell.create_inits()
         k_i = th.zeros(self.minibatch_size, self.n_components)
-        if use_cuda:
+        if get_cuda():
             h_i = h_i.cuda()
             k_i = k_i.cuda()
         return [h_i, k_i]
@@ -376,7 +377,7 @@ class Model(nn.Module):
         hiddens = [Variable(th.zeros(ts, minibatch_size, self.n_hid)) for i in range(3)]
         att_w = Variable(th.zeros(ts, minibatch_size, self.n_hid))
         att_k = Variable(th.zeros(ts, minibatch_size, self.n_att_components))
-        if use_cuda:
+        if get_cuda():
             hiddens = [h.cuda() for h in hiddens]
             att_w = att_w.cuda()
             att_k = att_k.cuda()
@@ -431,7 +432,7 @@ class Model(nn.Module):
     def create_inits(self):
         l2_h = th.zeros(self.minibatch_size, self.n_hid)
         l3_h = th.zeros(self.minibatch_size, self.n_hid)
-        if use_cuda:
+        if get_cuda():
              l2_h = l2_h.cuda()
              l3_h = l3_h.cuda()
         return self.att_l1.create_inits() + [l2_h, l3_h]
@@ -520,7 +521,7 @@ model = Model()
 optimizer = th.optim.Adam(model.parameters(), lr=learning_rate)
 loss_function = BernoulliAndBivariateGMM()
 
-if use_cuda:
+if get_cuda():
     model = model.cuda()
 
 def train_loop(itr, extra):
@@ -549,7 +550,7 @@ def train_loop(itr, extra):
         inp_mb_sub = inp_mb[cut_i * cut_len:(cut_i + 1) * cut_len]
         inp_mb_v = Variable(th.FloatTensor(inp_mb_sub))
 
-        if use_cuda:
+        if get_cuda():
             inp_mb_v = inp_mb_v.cuda()
             cinp_mb_v = cinp_mb_v.cuda()
             att_gru_init = att_gru_init.cuda()
@@ -610,7 +611,7 @@ def valid_loop(itr, extra):
         inp_mb_sub = inp_mb[cut_i * cut_len:(cut_i + 1) * cut_len]
         inp_mb_v = Variable(th.FloatTensor(inp_mb_sub))
 
-        if use_cuda:
+        if get_cuda():
             inp_mb_v = inp_mb_v.cuda()
             cinp_mb_v = cinp_mb_v.cuda()
             att_gru_init = att_gru_init.cuda()

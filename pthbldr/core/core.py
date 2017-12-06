@@ -412,6 +412,14 @@ tt = str(time.time()).split(".")[0]
 def get_time_string():
     return tt
 
+use_cuda = False
+def get_cuda():
+    return use_cuda
+
+def set_cuda(true_or_false):
+    logger.info("Setting global pthbldr cuda flag from {} to {}".format(use_cuda, true_or_false))
+    global use_cuda
+    use_cuda = true_or_false
 
 # decided at import, should be consistent over training
 checkpoint_uuid = get_name()[:6]
@@ -419,7 +427,7 @@ def get_checkpoint_uuid():
     return checkpoint_uuid
 
 def set_checkpoint_uuid(uuid_str):
-    logger.info("Setting global dagbldr uuid to %s" % uuid_str)
+    logger.info("Setting global pthbldr uuid to %s" % uuid_str)
     global checkpoint_uuid
     checkpoint_uuid = uuid_str
 
