@@ -17,6 +17,7 @@ try:
 except ImportError:
     import pickle
 
+import types
 import json
 import hashlib
 import readline
@@ -412,13 +413,15 @@ tt = str(time.time()).split(".")[0]
 def get_time_string():
     return tt
 
+global use_cuda
 use_cuda = False
 def get_cuda():
+    global use_cuda
     return use_cuda
 
 def set_cuda(true_or_false):
-    logger.info("Setting global pthbldr cuda flag from {} to {}".format(use_cuda, true_or_false))
     global use_cuda
+    logger.info("Setting global pthbldr cuda flag from {} to {}".format(use_cuda, true_or_false))
     use_cuda = true_or_false
 
 # decided at import, should be consistent over training
@@ -1113,12 +1116,24 @@ def create_checkpoint_dict(model, optimizer, magic_reload=False, force_match=Non
         clsmembers = inspect.getmembers(sys.modules["__main__"], is_class_member)
         return clsmembers
 
+    def print_functions():
+        is_function_member = lambda fn_obj: isinstance(fn_obj, types.FunctionType) and fn_obj.__module__ == "__main__"
+        fnmembers = inspect.getmembers(sys.modules["__main__"], predicate=is_function_member)
+        return fnmembers
+
     all_class_lines = []
     class_names = print_classes()
     for cn in class_names:
         class_source = inspect.getsourcelines(cn[1])[0]
         all_class_lines.append("".join(class_source))
+
+    all_function_lines = []
+    function_names = print_functions()
+    for fn in function_names:
+        function_source = inspect.getsourcelines(fn[1])[0]
+        all_function_lines.append("".join(function_source))
     checkpoint_dict["model_strings"] = all_class_lines
+    checkpoint_dict["model_function_strings"] = all_function_lines
     #  pickle pre and post to string? hack city
     checkpoint_dict["post"] = collections.OrderedDict()
     checkpoint_dict["post"]["model"] = model
@@ -1149,6 +1164,7 @@ def save_checkpoint(save_path, checkpoint_dict, use_resource_dir=True,
     start_time = time.time()
 
     assert "model_strings" in checkpoint_dict
+    assert "model_function_strings" in checkpoint_dict
     assert "post" in checkpoint_dict
 
     new_checkpoint_dict = collections.OrderedDict()
@@ -1224,12 +1240,29 @@ def load_checkpoint(filename):
                 setattr(__main__, name, eval(name))
 
     # double loop to try and get everything evaluated
+    was_printed = {}
     for ms in checkpoint_dict["model_strings"]:
         name = ms.split("\n")[0].split(" ")[-1].split("(")[0]
         try:
             exec(ms)
         except:
             continue
+        if name not in was_printed:
+            print("Injecting {} from saved checkpoint to primary namespace".format(name))
+        was_printed[name] = True
+        globals()[name] = eval(name)
+        setattr(__main__, name, eval(name))
+
+    for fs in checkpoint_dict["model_function_strings"]:
+        name = fs.split("\n")[0].split(" ")[1].split("(")[0]
+        try:
+            exec(fs)
+        except:
+            continue
+        if name not in was_printed:
+            print("Injecting {} from saved checkpoint to primary namespace".format(name))
+        was_printed[name] = True
+        globals()[name] = eval(name)
         setattr(__main__, name, eval(name))
 
     for ms in checkpoint_dict["model_strings"]:
@@ -1239,7 +1272,25 @@ def load_checkpoint(filename):
         except:
             print("ERROR: Still can't init {}".format(name))
             continue
+        if name not in was_printed:
+            print("Injecting {} from saved checkpoint to primary namespace".format(name))
+        was_printed[name] = True
+        globals()[name] = eval(name)
         setattr(__main__, name, eval(name))
+
+    for fs in checkpoint_dict["model_function_strings"]:
+        name = fs.split("\n")[0].split(" ")[1].split("(")[0]
+        try:
+            exec(fs)
+        except:
+            print("ERROR: Still can't init {}".format(name))
+            continue
+        if name not in was_printed:
+            print("Injecting {} from saved checkpoint to primary namespace".format(name))
+        was_printed[name] = True
+        globals()[name] = eval(name)
+        setattr(__main__, name, eval(name))
+
     post_dict = pickle.loads(checkpoint_dict["post"])
     return checkpoint_dict, post_dict["model"], post_dict["optimizer"]
 
@@ -1467,7 +1518,8 @@ def run_loop(train_loop_function, train_itr,
     """
     TODO: add upload fields to add data to an html and save a copy?
     """
-    ignore_keys = ["script_list_string", "model_strings", "post"]
+    ignore_keys = ["script_list_string", "model_strings", "model_function_strings",
+                   "post"]
 
     train_loop = train_loop_function
     valid_loop = valid_loop_function

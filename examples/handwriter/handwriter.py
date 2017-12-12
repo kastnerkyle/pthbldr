@@ -284,8 +284,10 @@ def norm_gradient(model, rescale):
         p.grad.data = scaling * p.grad.data
 
 
+# MUST PASS ALL THESE IN
 class Model(nn.Module):
-    def __init__(self):
+    def __init__(self, minibatch_size, n_in, n_hid, n_out, n_chars,
+                 n_att_components, n_components):
         super(Model, self).__init__()
         self.minibatch_size = minibatch_size
         self.n_in = n_in
@@ -374,9 +376,9 @@ class Model(nn.Module):
         # inits[2] = dec_gru1_init
         # inits[3] = dec_gru2_init
 
-        hiddens = [Variable(th.zeros(ts, minibatch_size, self.n_hid)) for i in range(3)]
-        att_w = Variable(th.zeros(ts, minibatch_size, self.n_hid))
-        att_k = Variable(th.zeros(ts, minibatch_size, self.n_att_components))
+        hiddens = [Variable(th.zeros(ts, self.minibatch_size, self.n_hid)) for i in range(3)]
+        att_w = Variable(th.zeros(ts, self.minibatch_size, self.n_hid))
+        att_k = Variable(th.zeros(ts, self.minibatch_size, self.n_att_components))
         if get_cuda():
             hiddens = [h.cuda() for h in hiddens]
             att_w = att_w.cuda()
@@ -517,7 +519,8 @@ class BernoulliAndBivariateGMM(nn.Module):
         nll = -ll1 - ll2
         return nll
 
-model = Model()
+model = Model(minibatch_size, n_in, n_hid, n_out, n_chars,
+              n_att_components, n_components)
 optimizer = th.optim.Adam(model.parameters(), lr=learning_rate)
 loss_function = BernoulliAndBivariateGMM()
 

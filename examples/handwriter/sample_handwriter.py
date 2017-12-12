@@ -2,14 +2,12 @@ from pthbldr import fetch_checkpoint_dict
 from pthbldr import get_cuda, set_cuda
 from extras import fetch_iamondb, list_iterator
 
-use_cuda = True
-global use_cuda
-
 checkpoint_dict, model, optimizer = fetch_checkpoint_dict(["handwriter"])
-use_cuda = True
 iamondb = fetch_iamondb()
 minibatch_size = 50
 cut_len = 300
+
+set_cuda(True)
 
 X = iamondb["data"]
 y = iamondb["target"]
@@ -24,9 +22,9 @@ valid_itr = list_iterator([pen_trace, chars], minibatch_size, axis=1, start_inde
 
 mb, mb_mask, c_mb, c_mb_mask = next(train_itr)
 train_itr.reset()
+loss_function = BernoulliAndBivariateGMM()
 
 def sample_sequence(itr):
-    global use_cuda
     mb, mb_mask, c_mb, c_mb_mask = next(train_itr)
     cinp_mb = c_mb.argmax(axis=-1).astype("int64")
     inp_mb = mb.astype(floatX)
@@ -41,6 +39,7 @@ def sample_sequence(itr):
     total_loss = 0
     total_count = 0
     inits = [Variable(i) for i in model.create_inits()]
+
     att_gru_init = inits[0]
     att_k_init = inits[1]
     dec_gru1_init = inits[2]
@@ -50,7 +49,7 @@ def sample_sequence(itr):
         inp_mb_sub = inp_mb[cut_i * cut_len:(cut_i + 1) * cut_len]
         inp_mb_v = Variable(th.FloatTensor(inp_mb_sub))
 
-        if use_cuda:
+        if get_cuda():
             inp_mb_v = inp_mb_v.cuda()
             cinp_mb_v = cinp_mb_v.cuda()
             att_gru_init = att_gru_init.cuda()
@@ -74,6 +73,7 @@ def sample_sequence(itr):
         dec_gru1_init = Variable(hiddens[1][-1].cpu().data)
         dec_gru2_init = Variable(hiddens[2][-1].cpu().data)
     print(total_loss / float(total_count))
+
     from IPython import embed; embed(); raise ValueError()
 
 sample_sequence(train_itr)
