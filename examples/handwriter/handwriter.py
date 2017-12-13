@@ -643,7 +643,6 @@ def valid_loop(itr, extra):
 checkpoint_dict, model, optimizer = create_checkpoint_dict(model, optimizer)
 print(torch_summarize(model))
 
-
 TL = TrainingLoop(train_loop, train_itr,
                   valid_loop, valid_itr,
                   n_epochs=n_epochs,

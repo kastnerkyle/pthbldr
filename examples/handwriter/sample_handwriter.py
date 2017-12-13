@@ -67,6 +67,7 @@ def sample_sequence(itr):
         l = l_full.mean()
         total_count += len(inp_mb_sub)
         total_loss = total_loss + l.cpu().data[0] * len(inp_mb_sub)
+        print(total_loss / float(total_count))
 
         att_k_init = Variable(att_k[-1].cpu().data)
         att_gru_init = Variable(hiddens[0][-1].cpu().data)

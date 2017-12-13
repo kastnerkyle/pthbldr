@@ -217,7 +217,7 @@ def fetch_checkpoint_dict(list_of_match_strings,
                             print("%i : %s (%s)" % (n, m, r['import_time']))
                     elif "extra_info" not in r.keys():
                         print("%i : %s (%s)" % (n, m, r['import_time']))
-                line = raw_input('Prompt ("0" through "X" select, "e0" through "eX" to edit info, "d0" through "dX" to delete, "Ctrl-C" to quit): ')
+                line = raw_input('Prompt ("0" through "X" select, "e0" through "eX" to edit info, "d0" through "dX" to delete, "CTRL-C" to quit): ')
                 try:
                     idx = int(line)
                     if idx in list(range(len(matches))):
@@ -288,7 +288,7 @@ def fetch_checkpoint_dict(list_of_match_strings,
                     print("Multiple matches found for %s on remote %s" % (info['uuid'], info['hostname']))
                     for n, rmp in enumerate(remote_match_paths):
                         print("%i : %s" % (n, rmp))
-                    line = raw_input('Prompt ("Ctrl-C" to quit): ')
+                    line = raw_input('Prompt ("CTRL-C" to quit): ')
                     try:
                         idx = int(line)
                         if idx in list(range(len(remote_match_paths))):
@@ -316,8 +316,22 @@ def fetch_checkpoint_dict(list_of_match_strings,
                 print('Appending matches %s' % str(extras))
                 pkl_matches = extras + pkl_matches
 
-            while tries < 3:
+            while True:
                 try:
+                    while True:
+                        print("Pickle matches found for %s on local %s" % (info['uuid'], info['hostname']))
+                        for n, pm in enumerate(pkl_matches):
+                            print("%i : %s" % (n, pm))
+                        line = raw_input('Prompt ("CTRL-C" to quit): ')
+                        try:
+                            idx = int(line)
+                            if idx in list(range(len(pkl_matches))):
+                                print("Selected index %i : %s" % (idx, pkl_matches[idx]))
+                                break
+                        except:
+                            pass
+                        print('Selection invalid : "%s"' % line)
+                        print('Try again!')
                     most_recent_pkl = pkl_matches[idx].split(" ")[-1]
                     if "/" in most_recent_pkl:
                         final_pkl = most_recent_pkl
@@ -340,11 +354,7 @@ def fetch_checkpoint_dict(list_of_match_strings,
                     loaded_cd, loaded_model, loaded_optimizer = load_checkpoint(local_cache)
                     break
                 except EOFError:
-                    idx += 1
-                    tries += 1
-                    logger.info("Tried pkl %s, but it failed. Trying older files..." % fname)
-                    if len(pkl_matches) <= idx:
-                        raise ValueError("Unable to open any pkl checkpoints!")
+                    logger.info("Tried pkl %s, but it failed. Trying other files..." % fname)
             return loaded_cd, loaded_model, loaded_optimizer
         else:
             # file is local
@@ -357,7 +367,7 @@ def fetch_checkpoint_dict(list_of_match_strings,
                     print("Multiple matches found for %s on local %s" % (info['uuid'], info['hostname']))
                     for n, rmp in enumerate(local_match_paths):
                         print("%i : %s" % (n, rmp))
-                    line = raw_input('Prompt ("stop" to quit): ')
+                    line = raw_input('Prompt ("CTRL-C" to quit): ')
                     try:
                         idx = int(line)
                         if idx in list(range(len(local_match_paths))):
@@ -382,7 +392,23 @@ def fetch_checkpoint_dict(list_of_match_strings,
                           if all([lrm in pm for lrm in list_of_remote_match_strings])]
                 pkl_matches = extras + pkl_matches
 
-            most_recent_pkl = pkl_matches[0].split(" ")[-1]
+            while True:
+                print("Pickle matches found for %s on local %s" % (info['uuid'], info['hostname']))
+                for n, pm in enumerate(pkl_matches):
+                    print("%i : %s" % (n, pm))
+                line = raw_input('Prompt ("CTRL-C" to quit): ')
+                try:
+                    idx = int(line)
+                    if idx in list(range(len(pkl_matches))):
+                        print("Selected index %i : %s" % (idx, pkl_matches[idx]))
+                        break
+                except:
+                    pass
+                print('Selection invalid : "%s"' % line)
+                print('Try again!')
+
+            # not most recent, just selected
+            most_recent_pkl = pkl_matches[idx].split(" ")[-1]
             if "/" in most_recent_pkl:
                 final_pkl = most_recent_pkl
             else:
