@@ -12,6 +12,9 @@ import sys
 import pickle
 import numpy as np
 from scipy import linalg
+from functools import wraps
+import exceptions
+from pthbldr import pe
 
 
 class base_iterator(object):
@@ -137,7 +140,7 @@ def check_fetch_iamondb():
             err = "Path %s does not exist!" % p
             err += " Download the %s files from %s" % (files, url)
             err += " and place them in the directory %s" % partial_path
-            raise ValueError(err)
+            print("WARNING: {}".format(err))
     return partial_path
 
 
@@ -160,6 +163,66 @@ def tokenize_ind(phrase, vocabulary):
     phrase = np.array(phrase, dtype='int32').ravel()
     phrase = dense_to_one_hot(phrase, vocabulary_size)
     return phrase
+
+
+# https://mrcoles.com/blog/3-decorator-examples-and-awesome-python/
+def rsync_fetch(fetch_func, machine_to_fetch_from, *args, **kwargs):
+    try:
+        r = fetch_func(*args, **kwargs)
+    except Exception as e:
+        if isinstance(e, IOError):
+            full_path = e.filename
+            filedir = str(os.sep).join(full_path.split(os.sep)[:-1])
+            if not os.path.exists(filedir):
+                if filedir[-1] != "/":
+                    fd = filedir + "/"
+                else:
+                    fd = filedir
+                os.makedirs(fd)
+
+            if filedir[-1] != "/":
+                fd = filedir + "/"
+            else:
+                fd = filedir
+
+            if not os.path.exists(full_path):
+                sdir = str(machine_to_fetch_from) + ":" + fd
+                cmd = "rsync -avhp --progress %s %s" % (sdir, fd)
+                pe(cmd, shell=True)
+        else:
+            print("unknown error {}".format(e))
+        r = fetch_func(*args, **kwargs)
+    return r
+
+
+def fetch_if_not_local(func, primary_machine):
+    from IPython import embed; embed(); raise ValueError()
+
+    filedir = "/Tmp/kastner/lj_speech_hybrid_speakers/norm_info/"
+    if not os.path.exists(filedir):
+        if filedir[-1] != "/":
+            fd = filedir + "/"
+        else:
+            fd = filedir
+        os.makedirs(fd)
+        #nfsdir = "/data/lisatmp4/kastner/vctk_American_speakers/norm_info/"
+        sdir = "leto01:" + filedir
+        cmd = "rsync -avhp %s %s" % (sdir, fd)
+        pe(cmd, shell=True)
+
+    filedir = "/Tmp/kastner/lj_speech_hybrid_speakers/numpy_features/"
+    if not os.path.exists(filedir):
+        if filedir[-1] != "/":
+            fd = filedir + "/"
+        else:
+            fd = filedir
+        if not os.path.exists(fd):
+            os.makedirs(fd)
+        sdir = "leto01:" + filedir
+        cmd = "rsync -avhp %s %s" % (sdir, fd)
+        pe(cmd, shell=True)
+
+    files = [filedir + fs for fs in sorted(os.listdir(filedir))]
 
 
 def fetch_iamondb():

@@ -1,9 +1,10 @@
 from pthbldr import fetch_checkpoint_dict
 from pthbldr import get_cuda, set_cuda
-from extras import fetch_iamondb, list_iterator
+from extras import fetch_iamondb, list_iterator, rsync_fetch
 
 checkpoint_dict, model, optimizer = fetch_checkpoint_dict(["handwriter"])
-iamondb = fetch_iamondb()
+iamondb = rsync_fetch(fetch_iamondb, "leto01")
+
 minibatch_size = 50
 cut_len = 300
 
@@ -44,6 +45,13 @@ def sample_sequence(itr):
     att_k_init = inits[1]
     dec_gru1_init = inits[2]
     dec_gru2_init = inits[3]
+    mu_results = []
+    sigma_results = []
+    corr_results = []
+    coeff_results = []
+    binary_results = []
+    att_w_results = []
+    att_k_results = []
     for cut_i in range(cuts):
         cinp_mb_v = Variable(th.LongTensor(cinp_mb))
         inp_mb_sub = inp_mb[cut_i * cut_len:(cut_i + 1) * cut_len]
@@ -61,6 +69,16 @@ def sample_sequence(itr):
                   att_gru_init, att_k_init, dec_gru1_init, dec_gru2_init)
         mu, sigma, corr, coeff, binary = o[:5]
         att_w, att_k = o[-2:]
+
+        mu_results.append(mu.cpu().data.numpy())
+        sigma_results.append(sigma.cpu().data.numpy())
+        corr_results.append(corr.cpu().data.numpy())
+        coeff_results.append(coeff.cpu().data.numpy())
+        binary_results.append(binary.cpu().data.numpy())
+
+        att_w_results.append(att_w.cpu().data.numpy())
+        att_k_results.append(att_k.cpu().data.numpy())
+
         hiddens = o[5:-2]
         l_full = loss_function(inp_mb_v, mu, sigma, corr, coeff, binary)
         # sum / mask once adding mask
@@ -74,6 +92,13 @@ def sample_sequence(itr):
         dec_gru1_init = Variable(hiddens[1][-1].cpu().data)
         dec_gru2_init = Variable(hiddens[2][-1].cpu().data)
     print(total_loss / float(total_count))
+    att_w_results = np.concatenate(att_w_results)
+    att_k_results = np.concatenate(att_k_results)
+    mu_results = np.concatenate(mu_results)
+    sigma_results = np.concatenate(sigma_results)
+    corr_results = np.concatenate(corr_results)
+    coeff_results = np.concatenate(coeff_results)
+    binary_results = np.concatenate(binary_results)
 
     from IPython import embed; embed(); raise ValueError()
 
