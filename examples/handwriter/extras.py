@@ -77,8 +77,11 @@ class base_iterator(object):
 
 
 class list_iterator(base_iterator):
-    def _slice_without_masks(self, ind):
+    def _slice_without_masks(self, ind, return_shapes=False):
         sliced_c = [np.asarray(c[ind]) for c in self.list_of_containers]
+        # object arrays
+        shapes = [[sci.shape for sci in sc] for sc in sliced_c]
+
         if min([len(i) for i in sliced_c]) < self.minibatch_size:
             self.reset()
             raise StopIteration("Invalid length slice")
@@ -109,17 +112,25 @@ class list_iterator(base_iterator):
                     for m, sc_i in enumerate(sc):
                         new_sc[:len(sc_i), m, :] = sc_i
                 sliced_c[n] = new_sc
-        return sliced_c
+        if not return_shapes:
+            return sliced_c
+        else:
+            return sliced_c, shapes
 
     def _slice_with_masks(self, ind):
-        cs = self._slice_without_masks(ind)
+        cs, cs_shapes = self._slice_without_masks(ind, return_shapes=True)
         if self.axis == 0:
-            ms = [np.ones_like(c[:, 0]) for c in cs]
+            ms = [np.zeros_like(c[:, 0]) for c in cs]
         elif self.axis == 1:
-            ms = [np.ones_like(c[:, :, 0]) for c in cs]
+            ms = [np.zeros_like(c[:, :, 0]) for c in cs]
+        for ni, csi in enumerate(cs):
+            for ii in range(len(cs_shapes[ni])):
+                if cs_shapes[ni][ii][0] < 1:
+                    raise AttributeError("Minibatch has invalid content size {}".format(cs_shapes[ni][ii][0]))
+                assert cs_shapes[ni][ii]
+                ms[ni][:cs_shapes[ni][ii][0], ii] = 1.
         assert len(cs) == len(ms)
         return [i for sublist in list(zip(cs, ms)) for i in sublist]
-
 
 
 def check_fetch_iamondb():

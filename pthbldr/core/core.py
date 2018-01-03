@@ -1673,7 +1673,10 @@ def run_loop(train_loop_function, train_itr,
             results_dict = {k: v for k, v in checkpoint_dict.items()
                             if k not in ignore_keys}
             this_results_dict = results_dict
-            loop_info = {"epoch": e_i}
+            loop_info = {"epoch": e_i,
+                         "train": False,
+                         "valid": False}
+            loop_info["train"] = True
             try:
                 # train loop
                 train_start = time.time()
@@ -1774,6 +1777,8 @@ def run_loop(train_loop_function, train_itr,
                                  None,
                                  None))
             except StopIteration:
+                loop_info["train"] = False
+                loop_info["valid"] = True
                 train_stop = time.time()
 
                 # Save the epoch trace
@@ -1812,6 +1817,7 @@ def run_loop(train_loop_function, train_itr,
                                      None,
                                      None))
                 except StopIteration:
+                    loop_info["valid"] = False
                     pass
                 print("")
                 valid_stop = time.time()
