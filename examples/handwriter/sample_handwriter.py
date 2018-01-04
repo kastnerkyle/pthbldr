@@ -1,6 +1,7 @@
 import matplotlib
 matplotlib.use("Agg")
 
+import copy
 from pthbldr import fetch_checkpoint_dict
 from pthbldr import get_cuda, set_cuda
 from extras import fetch_iamondb, list_iterator, rsync_fetch
@@ -108,6 +109,21 @@ def plot_lines_iamondb_example(X, title="", save_name=None):
 
 def sample_sequence(itr):
     mb, mb_mask, c_mb, c_mb_mask = next(train_itr)
+
+    fixed = []
+    for ii in range(mb.shape[1]):
+        min1 = -4.8499999
+        max1 = 24.25
+        min2 = -7.0
+        max2 = 16.25
+        sub = mb[:, ii]
+        sub[:, 1] = (sub[:, 1] - min1) / (max1 - min1) - 0.5
+        sub[:, 2] = (sub[:, 2] - min2) / (max2 - min2) - 0.5
+        fixed.append(sub)
+    fixed = np.array(fixed)
+    fixed = fixed.transpose(1, 0, 2)
+    mb = fixed
+
     cinp_mb = c_mb.argmax(axis=-1).astype("int64")
     inp_mb = mb.astype(floatX)
     cuts = int(len(inp_mb) / float(cut_len)) + 1
@@ -118,7 +134,6 @@ def sample_sequence(itr):
     # reset the model
     model.zero_grad()
 
-    total_loss = 0
     total_count = 0
     inits = [Variable(i) for i in model.create_inits()]
 
@@ -129,8 +144,8 @@ def sample_sequence(itr):
     mu_results = []
     sigma_results = []
     corr_results = []
-    coeff_results = []
-    binary_results = []
+    log_coeff_results = []
+    log_binary_results = []
     att_w_results = []
     att_k_results = []
     for cut_i in range(cuts):
@@ -151,20 +166,20 @@ def sample_sequence(itr):
 
         o = model(cinp_mb_v, inp_mb_v, mask_mb_v,
                   att_gru_init, att_k_init, dec_gru1_init, dec_gru2_init)
-        mu, sigma, corr, coeff, binary = o[:5]
+        mu, sigma, corr, log_coeff, log_binary = o[:5]
         att_w, att_k = o[-2:]
 
         mu = mu[:-1]
         sigma = sigma[:-1]
         corr = corr[:-1]
-        coeff = coeff[:-1]
-        binary = binary[:-1]
+        log_coeff = log_coeff[:-1]
+        log_binary = log_binary[:-1]
 
         mu_results.append(mu.cpu().data.numpy())
         sigma_results.append(sigma.cpu().data.numpy())
         corr_results.append(corr.cpu().data.numpy())
-        coeff_results.append(coeff.cpu().data.numpy())
-        binary_results.append(binary.cpu().data.numpy())
+        log_coeff_results.append(log_coeff.cpu().data.numpy())
+        log_binary_results.append(log_binary.cpu().data.numpy())
 
         att_w_results.append(att_w.cpu().data.numpy())
         att_k_results.append(att_k.cpu().data.numpy())
@@ -179,10 +194,11 @@ def sample_sequence(itr):
     mu_results = np.concatenate(mu_results)
     sigma_results = np.concatenate(sigma_results)
     corr_results = np.concatenate(corr_results)
-    coeff_results = np.concatenate(coeff_results)
-    binary_results = np.concatenate(binary_results)
+    log_coeff_results = np.concatenate(log_coeff_results)
+    log_binary_results = np.concatenate(log_binary_results)
 
-    binary_results = sigmoid(binary_results)
+    binary_results = sigmoid(log_binary_results)
+    coeff_results = np.exp(log_coeff_results)
 
     which_example = 0
     mu_i = mu_results[:, which_example]
@@ -195,9 +211,24 @@ def sample_sequence(itr):
 
     s = numpy_sample_bernoulli_and_bivariate_gmm(mu_i, sigma_i, corr_i, coeff_i,
                                                  binary_i, random_state, use_map=True)
+    samp_mb = s.copy()
+    orig_mb = mb[:, which_example].copy()
 
-    plot_lines_iamondb_example(s, title="", save_name="samp")
-    plot_lines_iamondb_example(mb[:, which_example], title="", save_name="gt")
+    def rescale(a):
+        aa = copy.deepcopy(a)
+        min1 = -4.8499999
+        max1 = 24.25
+        min2 = -7.0
+        max2 = 16.25
+        aa[:, 1] = (aa[:, 1] + 0.5) * (max1 - min1) + min1
+        aa[:, 2] = (aa[:, 2] + 0.5) * (max2 - min2) + min2
+        return aa
+
+    r_samp_mb = rescale(samp_mb)
+    r_orig_mb = rescale(orig_mb)
+
+    plot_lines_iamondb_example(r_samp_mb, title="", save_name="samp")
+    plot_lines_iamondb_example(r_orig_mb, title="", save_name="gt")
     att_k_i = att_k_results[:, which_example].mean(axis=-1)
 
     from IPython import embed; embed(); raise ValueError()

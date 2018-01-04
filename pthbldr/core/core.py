@@ -1223,6 +1223,8 @@ def load_checkpoint(filename):
     lines = checkpoint_dict["script_list_string"]
     ll = [l for l in lines if "import" in l]
     for lli in ll:
+        if "embed()" in lli:
+            continue
         exec(lli.lstrip())
         if "as" in lli:
             name_part = lli.split("as")[-1]

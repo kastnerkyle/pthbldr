@@ -233,6 +233,20 @@ class GaussianAttentionCell(nn.Module):
             k_i = k_i.cuda()
         return [h_i, k_i]
 
+def log_softmax(inp, axis=-1):
+    # https://discuss.pytorch.org/t/why-softmax-function-cant-specify-the-dimension-to-operate/2637
+    input_size = inp.size()
+
+    trans_input = inp.transpose(axis, len(input_size)-1)
+    trans_size = trans_input.size()
+
+    input_2d = trans_input.contiguous().view(-1, trans_size[-1])
+
+    log_softmax_2d = F.log_softmax(input_2d)
+
+    log_softmax_nd = log_softmax_2d.view(*trans_size)
+    tt = log_softmax_nd.transpose(axis, len(input_size)-1)
+    return tt
 
 def softmax(inp, eps=1E-6, axis=-1):
     # https://discuss.pytorch.org/t/why-softmax-function-cant-specify-the-dimension-to-operate/2637
@@ -245,10 +259,12 @@ def softmax(inp, eps=1E-6, axis=-1):
 
     #ee = th.exp(input_2d - th.max(input_2d).expand_as(input_2d))
     #soft_max_2d = ee / th.sum(ee + eps, dim=-1).expand_as(ee)
-    soft_max_2d = F.softmax(input_2d)
+    softmax_2d = F.softmax(input_2d)
+    esoftmax_2d = softmax_2d + eps
+    softmax_2d = esoftmax_2d / esoftmax_2d.sum(dim=-1).expand_as(esoftmax_2d)
 
-    soft_max_nd = soft_max_2d.view(*trans_size)
-    tt = soft_max_nd.transpose(axis, len(input_size)-1)
+    softmax_nd = softmax_2d.view(*trans_size)
+    tt = softmax_nd.transpose(axis, len(input_size)-1)
     return tt
 
 
@@ -308,7 +324,6 @@ class Model(nn.Module):
         self.minibatch_size = minibatch_size
         self.bias_coeff = bias
         self.bias_sigma = bias
-        self.bias_bernoulli = bias
 
         self.linp = nn.Embedding(self.n_chars, self.n_hid)
         # n_in is the number of chars, n_out is 3 (pen, X, y)
@@ -353,13 +368,23 @@ class Model(nn.Module):
                 m.bias.data.zero_()
             """
 
-    def _slice_outs(self, outs, corr_scale=0.98):
+    def _slice_outs(self, outs, eps=1E-5):
         k = self.n_components
         mu = outs[..., 0:2*k]
         sigma = outs[..., 2*k:4*k]
         corr = outs[..., 4*k:5*k]
-        lcoeff = outs[..., 5*k:6*k]
+        log_coeff = outs[..., 5*k:6*k]
         log_binary = outs[..., 6*k:]
+        corr = th.tanh(corr)
+        #binary = th.sigmoid(binary)
+        #binary = (binary + eps) * (1. - 2 * eps)
+        sigma = th.exp(sigma - self.bias_sigma) + 1E-2
+        log_coeff = log_softmax(log_coeff)
+        #coeff = softmax(coeff * (1. + self.bias_coeff))
+        mu = mu.contiguous().view(mu.size()[:-1] + (2, self.n_components))
+        sigma = sigma.contiguous().view(sigma.size()[:-1] + (2, self.n_components))
+        return mu, sigma, corr, log_coeff, log_binary
+        """
         #binary = th.sigmoid(binary)
         #sigma = th.exp(sigma.clamp(-3., 3.) - self.bias_sigma).clamp(1E-3, 10.)
         #sigma = F.softplus(sigma - self.bias_sigma) + 1E-4
@@ -367,12 +392,13 @@ class Model(nn.Module):
         sigma = th.exp(sigma.clamp(-10., 10.) - self.bias_sigma).clamp(1E-3, 10.)
         #) constant offset of 1 to set starting corr to 0?
         # scale it
-        corr = th.tanh(corr) * corr_scale
+        corr = th.tanh(corr)
         log_coeff = F.log_softmax(lcoeff)
         #coeff = softmax(coeff * (1. + self.bias_coeff))
         mu = mu.contiguous().view(mu.size()[:-1] + (2, self.n_components))
         sigma = sigma.contiguous().view(sigma.size()[:-1] + (2, self.n_components))
-        return mu, sigma, corr, log_coeff, log_binary
+        return mu, sigma, corr, coeff, binary
+        """
 
     def forward(self, c_inp, inp, mask_inp,
                 att_gru_init, att_k_init, dec_gru1_init, dec_gru2_init):
@@ -460,11 +486,8 @@ def logsumexp(inputs, dim=None):
 
 # https://discuss.pytorch.org/t/build-your-own-loss-function-in-pytorch/235/18
 class BernoulliAndBivariateGMM(nn.Module):
-    def __init__(self, epsilon=1E-5, exp_clamp_lim=10,
-                 sigma_lower_lim=1E-3, sigma_upper_lim=10.):
+    def __init__(self):
         super(BernoulliAndBivariateGMM, self).__init__()
-        self.epsilon = epsilon
-        self.exp_clamp_lim = exp_clamp_lim
 
     def forward(self, true, mu, sigma, corr, log_coeff, log_binary):
         # true is L, B, 3
@@ -480,6 +503,26 @@ class BernoulliAndBivariateGMM(nn.Module):
         t0 = true[:, :, 0][:, :, None]
         t1 = true[:, :, 1][:, :, None].expand_as(mu1)
         t2 = true[:, :, 2][:, :, None].expand_as(mu2)
+
+        # from F.binary_cross_entropy_with_logits
+        i = log_binary
+        t = t0
+        max_val = (-i).clamp(min=0)
+        nc_b = i - i * t + max_val + ((-max_val).exp() + (-i - max_val).exp()).log()
+        c_b = -nc_b
+
+        eps = 1E-5
+        buff = 1. - corr ** 2 + eps
+        std_x = (t1 - mu1) / sigma1
+        std_y = (t2 - mu2) / sigma2
+
+        pi = 3.14159
+        z = std_x ** 2 + (std_y ** 2 - 2. * corr * std_x * std_y)
+        cost = - z / (2. * buff) - 0.5 * th.log(buff) - th.log(sigma1) - th.log(sigma2) - np.log(2. * pi)
+
+        nll = -logsumexp(log_coeff + cost, dim=2) - c_b
+        return nll
+        #from IPython import embed; embed(); raise ValueError()
 
         """
         normalizer = 1. / (2. * 3.14159 * sigma1 * sigma2 * th.sqrt(1. - corr ** 2))
@@ -499,8 +542,9 @@ class BernoulliAndBivariateGMM(nn.Module):
         Z12 = pp1 * denom + pp2 * denom + pp3 * denom + pp4 * denom
         """
 
+        """
         inner11 = (0.5 * th.log(1. - corr ** 2 + self.epsilon))
-        inner12 = th.log(2. * 3.14159 * sigma1) + th.log(2. * 3.14159 *sigma2) # + th.log(2. * 3.14159)
+        inner12 = th.log(2. * 3.14159 * sigma1) + th.log(2. * 3.14159 * sigma2) # + th.log(2. * 3.14159)
 
         inner1 = inner11 + inner12
 
@@ -514,6 +558,7 @@ class BernoulliAndBivariateGMM(nn.Module):
         #Z -= (2. * (corr * (t1 - mu1) * (t2 - mu2)) / (sigma1 * sigma2))
         inner2 = 0.5 * (1. / (1. - corr ** 2 + self.epsilon))
         log_gprob = -(inner1 + (inner2 * Z))
+        """
 
         """
         # expansion of Z12?
@@ -562,14 +607,16 @@ class BernoulliAndBivariateGMM(nn.Module):
         cost = -(inner1 + (inner2 * Z))
         """
 
+        """
         # Thanks to DWF https://gist.github.com/dwf/b2e1d8d575cb9e7365f302c90d909893
         a, t = log_binary, t0
         c_b = -1. * th.sum(t * F.softplus(-a) + (1. - t) * F.softplus(a), dim=2)
+        """
 
         """
         # alternate version from BCE_with_logits
         # from F.binary_cross_entropy_with_logits
-        i = log_binary
+        i = th.log(binary)
         t = t0
         max_val = (-i).clamp(min=0)
         nc_b = i - i * t + max_val + ((-max_val).exp() + (-i - max_val).exp()).log()
@@ -585,10 +632,12 @@ class BernoulliAndBivariateGMM(nn.Module):
         print("normalizer {}, expZ {}".format(normalizer.sum(), th.exp(Z).sum()))
         print("l_fcoeff {}, l_log_gprob {}, l_c_b {}".format(l_fcoeff, l_log_gprob, c_b.sum()))
         """
-        ll1 = logsumexp(log_coeff + log_gprob, dim=2)[:, :, 0]
+        """
+        ll1 = logsumexp(log_coeff, dim=2) + logsumexp(log_gprob, dim=2)[:, :, 0] #logsumexp(log_coeff + log_gprob, dim=2)[:, :, 0]
         ll2 = c_b
         nll = -ll1 - ll2
         return nll
+        """
 
 model = Model(minibatch_size, n_in, n_hid, n_out, n_chars,
               n_att_components, n_components)
@@ -644,7 +693,6 @@ def loop(itr, extra):
     max1 median 24.25
     min2 median -7.0
     max2 median 16.25
-    """
     fixed = []
     for ii in range(mb.shape[1]):
         min1 = -4.8499999
@@ -658,6 +706,7 @@ def loop(itr, extra):
     fixed = np.array(fixed)
     fixed = fixed.transpose(1, 0, 2)
     mb = fixed
+    """
 
     global train_itt
     global train_nan_itt
@@ -733,6 +782,7 @@ def loop(itr, extra):
 
         att_w, att_k = o[-2:]
         hiddens = o[5:-2]
+        assert len(mu) > 2
         mu = mu[:-1]
         sigma = sigma[:-1]
         corr = corr[:-1]
@@ -746,7 +796,6 @@ def loop(itr, extra):
             print("The bad mama, at cut {}?".format(cut_a))
             from IPython import embed; embed()
         """
-
         if (l_full != l_full).float().sum().data[0] > 0:
             print("NaN detected, added to log")
             if extra["train"]:
@@ -768,9 +817,10 @@ def loop(itr, extra):
         l = ((l_full * mask_mb_v[1:]) / mask_mb_v[1:].sum().expand_as(l_full)).sum()
         if extra["train"]:
             l.backward(retain_variables=False)
+            #th.nn.utils.clip_grad_norm(net.parameters(), max_norm)
+            norm_gradient(model, 10.)
             optimizer.step()
             #clip_gradient(model, 100.)
-            norm_gradient(model, 10.)
         total_count += len(inp_mb_sub)
         total_loss = total_loss + l.cpu().data[0] * len(inp_mb_sub)
 
