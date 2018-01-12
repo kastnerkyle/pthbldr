@@ -1,18 +1,18 @@
 import matplotlib
 matplotlib.use("Agg")
+import numpy as np
+floatX = "float32"
 
 import copy
 from pthbldr import fetch_checkpoint_dict
 from pthbldr import get_cuda, set_cuda
-from extras import fetch_iamondb, list_iterator, rsync_fetch
+from extras import fetch_iamondb, list_iterator, rsync_fetch, plot_lines_iamondb_example
 
-checkpoint_dict, model, optimizer = fetch_checkpoint_dict(["handwriter"])
 iamondb = rsync_fetch(fetch_iamondb, "leto01")
 
 minibatch_size = 50
 cut_len = 300
-
-set_cuda(True)
+which_example = 0
 
 X = iamondb["data"]
 y = iamondb["target"]
@@ -27,6 +27,21 @@ valid_itr = list_iterator([pen_trace, chars], minibatch_size, axis=1, start_inde
 
 mb, mb_mask, c_mb, c_mb_mask = next(train_itr)
 train_itr.reset()
+
+orig_mb = mb[:, which_example].copy()
+#samp_mb[:, 0] = orig_mb[:len(samp_mb), 0]
+
+def get_text(cond):
+    inv_map = {v: k for k, v in iamondb['vocabulary'].items()}
+    return "".join([inv_map[c] for c in cond.flatten()])
+
+text = get_text(c_mb[:, which_example].argmax(axis=-1))
+plot_lines_iamondb_example(orig_mb, title=text, save_name="tru")
+
+from IPython import embed; embed(); raise ValueError()
+
+checkpoint_dict, model, optimizer = fetch_checkpoint_dict(["handwriter"])
+set_cuda(True)
 loss_function = BernoulliAndBivariateGMM()
 
 # based on
@@ -40,6 +55,23 @@ def sigmoid(x):
     ltz_z = np.exp(ltz * x)
     ltz_z = ltz * (ltz_z / (1. + ltz_z))
     return (gtz_z + ltz_z)
+
+def softmax(X, axis=-1):
+    # https://nolanbconaway.github.io/blog/2017/softmax-numpy
+    # make X at least 2d
+    y = np.atleast_2d(X)
+    # subtract the max for numerical stability
+    y = y - np.expand_dims(np.max(y, axis=axis), axis)
+    # exponentiate y
+    y = np.exp(y)
+    # take the sum along the specified axis
+    ax_sum = np.expand_dims(np.sum(y, axis=axis), axis)
+    # finally: divide elementwise
+    p = y / ax_sum
+    # flatten if X was 1D
+    if len(X.shape) == 1:
+        p = p.flatten()
+    return p
 
 
 def numpy_sample_bernoulli_and_bivariate_gmm(mu, sigma, corr, coeff, binary,
@@ -77,52 +109,8 @@ def numpy_sample_bernoulli_and_bivariate_gmm(mu, sigma, corr, coeff, binary,
         return s
 
 
-def plot_lines_iamondb_example(X, title="", save_name=None):
-    import matplotlib.pyplot as plt
-    f, ax = plt.subplots()
-    x = np.cumsum(X[:, 1])
-    y = np.cumsum(X[:, 2])
-
-    size_x = x.max() - x.min()
-    size_y = y.max() - y.min()
-
-    f.set_size_inches(5 * size_x / size_y, 5)
-    cuts = np.where(X[:, 0] == 1)[0]
-    if len(cuts) == 0:
-        cuts = [len(X)]
-    start = 0
-
-    for cut_value in cuts:
-        ax.plot(x[start:cut_value], y[start:cut_value],
-                'k-', linewidth=1.5)
-        start = cut_value + 1
-    ax.axis('equal')
-    ax.axes.get_xaxis().set_visible(False)
-    ax.axes.get_yaxis().set_visible(False)
-    ax.set_title(title)
-
-    if save_name is None:
-        plt.show()
-    else:
-        plt.savefig(save_name, bbox_inches='tight', pad_inches=0)
-
-
 def sample_sequence(itr):
     mb, mb_mask, c_mb, c_mb_mask = next(train_itr)
-
-    fixed = []
-    for ii in range(mb.shape[1]):
-        min1 = -4.8499999
-        max1 = 24.25
-        min2 = -7.0
-        max2 = 16.25
-        sub = mb[:, ii]
-        sub[:, 1] = (sub[:, 1] - min1) / (max1 - min1) - 0.5
-        sub[:, 2] = (sub[:, 2] - min2) / (max2 - min2) - 0.5
-        fixed.append(sub)
-    fixed = np.array(fixed)
-    fixed = fixed.transpose(1, 0, 2)
-    mb = fixed
 
     cinp_mb = c_mb.argmax(axis=-1).astype("int64")
     inp_mb = mb.astype(floatX)
@@ -197,10 +185,10 @@ def sample_sequence(itr):
     log_coeff_results = np.concatenate(log_coeff_results)
     log_binary_results = np.concatenate(log_binary_results)
 
-    binary_results = sigmoid(log_binary_results)
-    coeff_results = np.exp(log_coeff_results)
 
-    which_example = 0
+    binary_results = sigmoid(log_binary_results)
+    coeff_results = softmax(log_coeff_results)
+
     mu_i = mu_results[:, which_example]
     sigma_i = sigma_results[:, which_example]
     corr_i = corr_results[:, which_example]
@@ -210,25 +198,19 @@ def sample_sequence(itr):
     random_state = np.random.RandomState(2177)
 
     s = numpy_sample_bernoulli_and_bivariate_gmm(mu_i, sigma_i, corr_i, coeff_i,
-                                                 binary_i, random_state, use_map=True)
+                                                 binary_i, random_state, use_map=False)
     samp_mb = s.copy()
     orig_mb = mb[:, which_example].copy()
+    #samp_mb[:, 0] = orig_mb[:len(samp_mb), 0]
 
-    def rescale(a):
-        aa = copy.deepcopy(a)
-        min1 = -4.8499999
-        max1 = 24.25
-        min2 = -7.0
-        max2 = 16.25
-        aa[:, 1] = (aa[:, 1] + 0.5) * (max1 - min1) + min1
-        aa[:, 2] = (aa[:, 2] + 0.5) * (max2 - min2) + min2
-        return aa
+    def get_text(cond):
+        inv_map = {v: k for k, v in iamondb['vocabulary'].items()}
+        return "".join([inv_map[c] for c in cond.flatten()])
 
-    r_samp_mb = rescale(samp_mb)
-    r_orig_mb = rescale(orig_mb)
+    text = get_text(cinp_mb[:, which_example])
 
-    plot_lines_iamondb_example(r_samp_mb, title="", save_name="samp")
-    plot_lines_iamondb_example(r_orig_mb, title="", save_name="gt")
+    plot_lines_iamondb_example(samp_mb, title=text, save_name="samp")
+    plot_lines_iamondb_example(orig_mb, title=text, save_name="gt")
     att_k_i = att_k_results[:, which_example].mean(axis=-1)
 
     from IPython import embed; embed(); raise ValueError()

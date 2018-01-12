@@ -8,13 +8,49 @@ import os
 import re
 import tarfile
 from collections import Counter
+from bs4 import BeautifulSoup as Soup
 import sys
 import pickle
 import numpy as np
+import fnmatch
 from scipy import linalg
 from functools import wraps
 import exceptions
 from pthbldr import pe
+
+import matplotlib
+matplotlib.use("Agg")
+
+def plot_lines_iamondb_example(X, title="", save_name=None):
+    import matplotlib.pyplot as plt
+    f, ax = plt.subplots()
+    x = np.cumsum(X[:, 1])
+    y = np.cumsum(X[:, 2])
+
+    size_x = x.max() - x.min()
+    size_y = y.max() - y.min()
+
+    f.set_size_inches(5 * size_x / size_y, 5)
+    cuts = np.where(X[:, 0] == 1)[0]
+    if len(cuts) == 0:
+        cuts = [len(X)]
+    start = 0
+
+    for cut_value in cuts:
+        ax.plot(x[start:cut_value], y[start:cut_value],
+                'k-', linewidth=1.5)
+        start = cut_value + 1
+    ax.axis('equal')
+    ax.axes.get_xaxis().set_visible(False)
+    ax.axes.get_yaxis().set_visible(False)
+    ax.set_title(title)
+    plt.gca().invert_xaxis()
+    plt.gca().invert_yaxis()
+
+    if save_name is None:
+        plt.show()
+    else:
+        plt.savefig(save_name, bbox_inches='tight', pad_inches=0)
 
 
 class base_iterator(object):
@@ -236,6 +272,20 @@ def fetch_if_not_local(func, primary_machine):
     files = [filedir + fs for fs in sorted(os.listdir(filedir))]
 
 
+#def extract_points(filename):
+    #with open(filename,'r') as f:
+    #    soup = Soup(f.read(),'lxml')
+def extract_points(file_like):
+    # file_like has .read() attr
+    # from https://gist.github.com/lirnli/fc7cf6235ef1a0343321af6f1be01702
+    soup = Soup(file_like, 'lxml')
+    pts = [[float(pt['x']), float(pt['y'])] for pt in soup.find_all('point')]
+    pen_lifts = []
+    for stroke in soup.find_all('stroke'):
+        pen_lifts += [0] * (len(stroke.find_all('point')) - 1) + [1]
+    return pts, pen_lifts
+
+
 def fetch_iamondb():
     from lxml import etree
     partial_path = check_fetch_iamondb()
@@ -272,8 +322,10 @@ def fetch_iamondb():
 
         strokes_bp = strokes
 
+        clip = 500
         strokes = [x[1:] - x[:-1] for x in strokes]
         strokes = [np.vstack([[0, 0, 0], x]) for x in strokes]
+        strokes = [np.minimum(np.maximum(x, -clip), clip) for x in strokes]
 
         for i, stroke in enumerate(strokes):
             strokes[i][:, 0] = strokes_bp[i][:, 0]
@@ -377,6 +429,8 @@ def fetch_iamondb():
         pickle_dict["vocabulary_tokenizer"] = tokenize_ind
         pickle_dict["vocabulary"] = char2code
         pickle_dict["data"] = strokes
+        # check the it is correct order
+        #plot_lines_iamondb_example(strokes[0], title="", save_name="tru")
         pickle_dict["target"] = y
         f = open(pickle_path, "wb")
         pickle.dump(pickle_dict, f, -1)
@@ -384,6 +438,141 @@ def fetch_iamondb():
     with open(pickle_path, "rb") as f:
         pickle_dict = pickle.load(f)
     return pickle_dict
+
+"""
+def fetch_iamondb():
+    from lxml import etree
+    partial_path = check_fetch_iamondb()
+    pickle_path = os.path.join(partial_path, "iamondb_saved.pkl")
+    if not os.path.exists(pickle_path):
+        print("Saved pickle file {} not found, creating...".format(pickle_path))
+        all_xml_files = []
+        for root, dirnames, filenames in os.walk(os.path.join(partial_path, "lineStrokes")):
+            for filename in fnmatch.filter(filenames, '*.xml'):
+                all_xml_files.append(os.path.join(root, filename))
+        input_file = os.path.join(partial_path, 'lineStrokes-all.tar.gz')
+        raw_data = tarfile.open(input_file)
+        transcript_files = []
+        strokes = []
+        idx = 0
+        factor = 20.
+        clip = 500
+        for member in raw_data.getmembers():
+            if member.isreg():
+                transcript_files.append(member.name)
+                content = raw_data.extractfile(member)
+                _pts, _pen_lifts = extract_points(content)
+                _pts, _pen_lifts = np.array(_pts), np.array(_pen_lifts)
+                _pts, _pen_lifts = _pts - np.roll(_pts, 1, axis=0), _pen_lifts
+
+                _pts[0][0] = 100
+                _pts[0][1] = 0
+                _pen_lifts[0] = 1
+                _pts = np.minimum(np.maximum(_pts, -clip), clip) / factor
+                points = np.concatenate((_pen_lifts[:, None], _pts), axis=-1)
+                strokes.append(points)
+                idx += 1
+
+        transcript_files = [x.split(os.sep)[-1]
+                            for x in transcript_files]
+        transcript_files = [re.sub('-[0-9][0-9].xml', '.txt', x)
+                            for x in transcript_files]
+
+        counter = Counter(transcript_files)
+
+        input_file = os.path.join(partial_path, 'ascii-all.tar.gz')
+
+        raw_data = tarfile.open(input_file)
+        member = raw_data.getmembers()[10]
+
+        all_transcripts = []
+        for member in raw_data.getmembers():
+            if member.isreg() and member.name.split("/")[-1] in transcript_files:
+                fp = raw_data.extractfile(member)
+
+                cleaned = [t.strip() for t in fp.readlines()
+                        if t != '\r\n'
+                        and t != '\n'
+                        and t != '\r\n'
+                        and t.strip() != '']
+
+                # Try using CSR
+                idx = [n for n, li in enumerate(cleaned) if li == "CSR:"][0]
+                cleaned_sub = cleaned[idx + 1:]
+                corrected_sub = []
+                for li in cleaned_sub:
+                    # Handle edge case with %%%%% meaning new line?
+                    if "%" in li:
+                        li2 = re.sub('\%\%+', '%', li).split("%")
+                        li2 = [l.strip() for l in li2]
+                        corrected_sub.extend(li2)
+                    else:
+                        corrected_sub.append(li)
+
+                if counter[member.name.split("/")[-1]] != len(corrected_sub):
+                    pass
+
+                all_transcripts.extend(corrected_sub)
+
+        # Last file transcripts are almost garbage
+        all_transcripts[-1] = 'A move to stop'
+        all_transcripts.append('garbage')
+        all_transcripts.append('A move to stop')
+        all_transcripts.append('garbage')
+        all_transcripts.append('A move to stop')
+        all_transcripts.append('A move to stop')
+        all_transcripts.append('Marcus Luvki')
+        all_transcripts.append('Hallo Well')
+        # Remove outliers and big / small sequences
+        # Makes a BIG difference.
+        filter_ = [len(x) <= 1200 and len(x) >= 300 and
+                   x.max() <= 100 and x.min() >= -50 for x in strokes]
+
+        strokes = [x for x, cond in zip(strokes, filter_) if cond]
+        all_transcripts = [x for x, cond in
+                           zip(all_transcripts, filter_) if cond]
+
+        num_examples = len(strokes)
+
+        # Shuffle for train/validation/test division
+        rng = np.random.RandomState(1999)
+        shuffle_idx = rng.permutation(num_examples)
+
+        strokes = [strokes[x] for x in shuffle_idx]
+        all_transcripts = [all_transcripts[x] for x in shuffle_idx]
+
+        all_chars = ([chr(ord('a') + i) for i in range(26)] +
+                     [chr(ord('A') + i) for i in range(26)] +
+                     [chr(ord('0') + i) for i in range(10)] +
+                     [',', '.', '!', '?', ';', ' ', ':'] +
+                     ["#", '&', '+', '[', ']', '{', '}'] +
+                     ["/", "*"] +
+                     ['(', ')', '"', "'", '-', '<UNK>'])
+
+        code2char = dict(enumerate(all_chars))
+        char2code = {v: k for k, v in code2char.items()}
+        vocabulary_size = len(char2code.keys())
+        unk_char = '<UNK>'
+
+        y = []
+        for n, li in enumerate(all_transcripts):
+            y.append(tokenize_ind(li, char2code))
+
+        pickle_dict = {}
+        pickle_dict["target_phrases"] = all_transcripts
+        pickle_dict["vocabulary_size"] = vocabulary_size
+        pickle_dict["vocabulary_tokenizer"] = tokenize_ind
+        pickle_dict["vocabulary"] = char2code
+        pickle_dict["data"] = strokes
+        pickle_dict["target"] = y
+        f = open(pickle_path, "wb")
+        pickle.dump(pickle_dict, f, -1)
+        f.close()
+        print("Pickle file created at {}".format(pickle_path))
+    with open(pickle_path, "rb") as f:
+        pickle_dict = pickle.load(f)
+    return pickle_dict
+"""
 
 
 def plot_lines_iamondb_example(X, title="", save_name=None):

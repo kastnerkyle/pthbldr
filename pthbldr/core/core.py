@@ -205,6 +205,8 @@ def fetch_checkpoint_dict(list_of_match_strings,
             matches = final_matches
             import_times = final_import_times
 
+            from IPython import embed; embed(); raise ValueError()
+
             while True:
                 print("Multiple matches found for %s" % (str(list_of_match_strings)))
                 for n, m in enumerate(matches):
@@ -607,7 +609,8 @@ def find_pthbldr_lookup_file(force_match=None, quick_check=False):
         else:
             rh = force_match in lu_path
         if str(res["script_hash"]).strip() == self_hash or rh:
-            logger.info("magic_reload match found at %s, reloading weights and stats" % lu_path)
+            if force_match is None:
+                logger.info("magic_reload match found at %s, reloading weights and stats" % lu_path)
             matches.append(res)
 
     if len(matches) > 1:
@@ -1115,8 +1118,8 @@ def create_checkpoint_dict(model, optimizer, magic_reload=False, force_match=Non
        entries in ~/pthbldr_lookup/*.json.
 
     force_match : str, default None
-       Substring to force match with, default will do intelligent search based
-       on the name.
+       Substring to force match with, default will do basic search
+       on the script name.
 
     Returns
     -------
@@ -1267,7 +1270,13 @@ def load_checkpoint(filename):
                 globals()[name] = eval(name)
                 setattr(__main__, name, eval(name))
 
-    # double loop to try and get everything evaluated
+    # add to globals everything in the main script
+    for name in dir(__main__):
+        if len(name) >= 2 and "__" in name[:2] and "__" == name[-2:]:
+            continue
+        globals()[name] = eval("__main__." + name)
+        #setattr(__main__, name, eval(name))
+
     was_printed = {}
     for ms in checkpoint_dict["model_strings"]:
         name = ms.split("\n")[0].split(" ")[-1].split("(")[0]

@@ -250,6 +250,8 @@ def log_softmax(inp, axis=-1):
 
 def softmax(inp, eps=1E-6, axis=-1):
     # https://discuss.pytorch.org/t/why-softmax-function-cant-specify-the-dimension-to-operate/2637
+    if axis != -1:
+        raise ValueError("NYI")
     input_size = inp.size()
 
     trans_input = inp.transpose(axis, len(input_size)-1)
@@ -257,11 +259,11 @@ def softmax(inp, eps=1E-6, axis=-1):
 
     input_2d = trans_input.contiguous().view(-1, trans_size[-1])
 
-    #ee = th.exp(input_2d - th.max(input_2d).expand_as(input_2d))
-    #soft_max_2d = ee / th.sum(ee + eps, dim=-1).expand_as(ee)
-    softmax_2d = F.softmax(input_2d)
-    esoftmax_2d = softmax_2d + eps
-    softmax_2d = esoftmax_2d / esoftmax_2d.sum(dim=-1).expand_as(esoftmax_2d)
+    ee = th.exp(input_2d - th.max(input_2d).expand_as(input_2d))
+    softmax_2d = ee / (th.sum(ee, dim=-1).expand_as(ee) + eps)
+    #softmax_2d = F.softmax(input_2d)
+    #esoftmax_2d = softmax_2d
+    #softmax_2d = esoftmax_2d / esoftmax_2d.sum(dim=-1).expand_as(esoftmax_2d) + eps
 
     softmax_nd = softmax_2d.view(*trans_size)
     tt = softmax_nd.transpose(axis, len(input_size)-1)
@@ -287,6 +289,9 @@ def norm_gradient(model, rescale):
     for p in model.parameters():
         if p.grad is None:
             continue
+        if (p.grad != p.grad).float().sum().data[0] > 0:
+            print("WARNING: NaN grad, replacing by {}".format(rescale))
+            p.grad[p.grad != p.grad] = rescale
         if grad_norm is None:
             grad_norm = (p.grad.data ** 2).sum()
         else:
@@ -378,8 +383,8 @@ class Model(nn.Module):
         corr = th.tanh(corr)
         #binary = th.sigmoid(binary)
         #binary = (binary + eps) * (1. - 2 * eps)
-        sigma = th.exp(sigma - self.bias_sigma) + 1E-2
-        log_coeff = log_softmax(log_coeff)
+        sigma = th.exp(sigma - self.bias_sigma) + 1E-4
+        #log_coeff = log_softmax(log_coeff)
         #coeff = softmax(coeff * (1. + self.bias_coeff))
         mu = mu.contiguous().view(mu.size()[:-1] + (2, self.n_components))
         sigma = sigma.contiguous().view(sigma.size()[:-1] + (2, self.n_components))
@@ -504,14 +509,18 @@ class BernoulliAndBivariateGMM(nn.Module):
         t1 = true[:, :, 1][:, :, None].expand_as(mu1)
         t2 = true[:, :, 2][:, :, None].expand_as(mu2)
 
-        # from F.binary_cross_entropy_with_logits
-        i = log_binary
+        eps = 1E-5
+
+        binary = th.sigmoid(log_binary)
+        binary = (binary + eps) * (1. - 2 * eps)
+        coeff = softmax(log_coeff, eps=eps)
+
+        i = th.log(binary)
         t = t0
         max_val = (-i).clamp(min=0)
         nc_b = i - i * t + max_val + ((-max_val).exp() + (-i - max_val).exp()).log()
         c_b = -nc_b
 
-        eps = 1E-5
         buff = 1. - corr ** 2 + eps
         std_x = (t1 - mu1) / sigma1
         std_y = (t2 - mu2) / sigma2
@@ -520,7 +529,7 @@ class BernoulliAndBivariateGMM(nn.Module):
         z = std_x ** 2 + (std_y ** 2 - 2. * corr * std_x * std_y)
         cost = - z / (2. * buff) - 0.5 * th.log(buff) - th.log(sigma1) - th.log(sigma2) - np.log(2. * pi)
 
-        nll = -logsumexp(log_coeff + cost, dim=2) - c_b
+        nll = -logsumexp(th.log(coeff) + cost, dim=2) - c_b
         return nll
         #from IPython import embed; embed(); raise ValueError()
 
@@ -831,13 +840,14 @@ def loop(itr, extra):
     return [total_loss / float(total_count)]
 
 
-checkpoint_dict, model, optimizer = create_checkpoint_dict(model, optimizer)
+checkpoint_dict, model, optimizer = create_checkpoint_dict(model, optimizer,
+        magic_reload=True, force_match="handwriter")
 print(torch_summarize(model))
 
 TL = TrainingLoop(loop, train_itr,
                   loop, valid_itr,
                   n_epochs=n_epochs,
-                  checkpoint_every_n_seconds=60 * 60,
+                  checkpoint_every_n_seconds=60 * 60 * 4,
                   checkpoint_every_n_epochs=10,
                   checkpoint_delay=5,
                   checkpoint_dict=checkpoint_dict,
