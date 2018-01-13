@@ -1167,9 +1167,15 @@ def create_checkpoint_dict(model, optimizer, magic_reload=False, force_match=Non
     checkpoint_dict["post"] = collections.OrderedDict()
     checkpoint_dict["post"]["model"] = model
     checkpoint_dict["post"]["optimizer"] = optimizer
+    checkpoint_dict["model_state_dict"] = copy.deepcopy(model.state_dict())
+    checkpoint_dict["optimizer_state_dict"] = copy.deepcopy(optimizer.state_dict())
 
     if magic_reload:
-        reload_cd, reload_model, reload_optimizer = find_pthbldr_lookup_file(force_match=force_match)
+        print("WARNING: loop function should be defined AFTER create_checkpoint_dict with magic_reload=True")
+        ret = find_pthbldr_lookup_file(force_match=force_match)
+        if ret is None:
+            raise FileNotFoundError("No saved matches found for force_match={}, exiting...".format(force_match))
+        reload_cd, reload_model, reload_optimizer = ret
         old_keys = checkpoint_dict.keys()
         replaced = []
         for k, v in reload_cd.items():
@@ -1184,8 +1190,8 @@ def create_checkpoint_dict(model, optimizer, magic_reload=False, force_match=Non
         return checkpoint_dict, model, optimizer
 
 
-def save_checkpoint(save_path, checkpoint_dict, use_resource_dir=True,
-                    latest_tag=None):
+def save_checkpoint(save_path, checkpoint_dict,
+                    use_resource_dir=True, latest_tag=None):
     if use_resource_dir:
         save_path = os.path.join(get_checkpoint_dir(), save_path)
     sys.setrecursionlimit(40000)
@@ -1195,15 +1201,34 @@ def save_checkpoint(save_path, checkpoint_dict, use_resource_dir=True,
     assert "model_strings" in checkpoint_dict
     assert "model_function_strings" in checkpoint_dict
     assert "post" in checkpoint_dict
+    assert "model_state_dict" in checkpoint_dict
+    assert "optimizer_state_dict" in checkpoint_dict
 
     new_checkpoint_dict = collections.OrderedDict()
     if hasattr(checkpoint_dict["post"], "keys"):
         new_checkpoint_dict["post"] = pickle.dumps(checkpoint_dict["post"])
     else:
         new_checkpoint_dict["post"] = checkpoint_dict["post"]
+
     for k in checkpoint_dict.keys():
-        if k != "post":
-            new_checkpoint_dict[k] = checkpoint_dict[k]
+        if k == "post":
+            continue
+        if k == "model_state_dict":
+            continue
+        if k == "optimizer_state_dict":
+            continue
+        new_checkpoint_dict[k] = checkpoint_dict[k]
+
+    post_dict = pickle.loads(new_checkpoint_dict["post"])
+    optimizer = post_dict["optimizer"]
+    model = post_dict["model"]
+
+    new_checkpoint_dict["model_state_dict"] = copy.deepcopy(model.state_dict())
+    new_checkpoint_dict["optimizer_state_dict"] = copy.deepcopy(optimizer.state_dict())
+    del post_dict
+    del model
+    del optimizer
+
     # saver
     with open(save_path, "w") as f:
         pickle.dump(new_checkpoint_dict, f)
@@ -1329,7 +1354,13 @@ def load_checkpoint(filename):
         setattr(__main__, name, eval(name))
 
     post_dict = pickle.loads(checkpoint_dict["post"])
-    return checkpoint_dict, post_dict["model"], post_dict["optimizer"]
+    optimizer = post_dict["optimizer"]
+    optimizer_state = checkpoint_dict["optimizer_state_dict"]
+    model = post_dict["model"]
+    model_state = checkpoint_dict["model_state_dict"]
+    model.load_state_dict(model_state)
+    optimizer.load_state_dict(optimizer_state)
+    return checkpoint_dict, model, optimizer
 
 
 def save_weights(save_path, items_dict, use_resource_dir=True,
@@ -1556,7 +1587,7 @@ def run_loop(train_loop_function, train_itr,
     TODO: add upload fields to add data to an html and save a copy?
     """
     ignore_keys = ["script_list_string", "model_strings", "model_function_strings",
-                   "post"]
+                   "model_state_dict", "optimizer_state_dict", "post"]
 
     train_loop = train_loop_function
     valid_loop = valid_loop_function

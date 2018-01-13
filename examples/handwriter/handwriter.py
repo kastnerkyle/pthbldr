@@ -687,6 +687,12 @@ except:
     from IPython import embed; embed(); raise ValueError()
 """
 
+# loop *must* be after loading...
+#checkpoint_dict, model, optimizer = create_checkpoint_dict(model, optimizer,
+#    magic_reload=True, force_match="handwriter")
+checkpoint_dict, model, optimizer = create_checkpoint_dict(model, optimizer)
+print(torch_summarize(model))
+
 train_itt = 0
 train_nan_itt = []
 train_nan_chunk = []
@@ -839,10 +845,6 @@ def loop(itr, extra):
         dec_gru2_init = Variable(hiddens[2][-1].cpu().data)
     return [total_loss / float(total_count)]
 
-
-checkpoint_dict, model, optimizer = create_checkpoint_dict(model, optimizer,
-        magic_reload=True, force_match="handwriter")
-print(torch_summarize(model))
 
 TL = TrainingLoop(loop, train_itr,
                   loop, valid_itr,
