@@ -185,6 +185,7 @@ class GaussianAttentionCell(nn.Module):
 
         # go from minibatch_size, n_att_components, 1 to ms, nac, c_inp_seq_len
         k_t = k_t.expand(k_t.size(0), k_t.size(1), u_c.size(2))
+
         # go from c_inp_seq_len to ms, nax, c_inp_seq_len
         u_c = u_c.expand(k_t.size(0), k_t.size(1), u_c.size(2))
 
@@ -236,6 +237,8 @@ class GaussianAttentionCell(nn.Module):
         att_k_t_exp = th.exp(att_k_t)
 
         k_t = k_tm1.expand_as(att_k_t) + att_k_t_exp
+        # clamp to only go 2x past the limit
+        #k_t = k_t.clamp(0., 2 * cts)
 
         phi = self.calc_phi(k_t, a_t_exp, b_t_exp, u)
         # shape minibatch_size, 1, c_inp_seq_len
@@ -473,9 +476,8 @@ class Model(nn.Module):
             att_w = att_w.cuda()
             att_k = att_k.cuda()
         att_inits = self.att_l1.create_inits()
-        att_gru_h_tm1 = Variable(att_inits[0])
-        att_k_tm1 = Variable(att_inits[1])
-
+        att_gru_h_tm1 = Variable(att_inits[0]) + att_gru_init
+        att_k_tm1 = Variable(att_inits[1]) + att_k_init
 
         for i in range(ts):
             #proj_tm1 = lproj_o[0]
@@ -489,6 +491,17 @@ class Model(nn.Module):
             h1_t = att_h_t
             w_t = att_w_t
             k_t = att_k_t
+            """
+            if not (att_k_t.cpu().data.numpy() >= att_k_tm1.cpu().data.numpy()).all():
+                print("not monotonic????")
+                from IPython import embed; embed(); raise ValueError()
+            """
+
+            """
+            if not (len(c_inp) + 1 > att_k_t.cpu().data.numpy()).all():
+                print("too big???")
+                from IPython import embed; embed(); raise ValueError()
+            """
 
             inp_f_l2 = self.proj_to_l2(proj_t)
             inp_f_l3 = self.proj_to_l3(proj_t)
@@ -845,6 +858,7 @@ def loop(itr, extra):
         mu, sigma, corr, log_coeff, log_binary = o[:5]
 
         att_w, att_k = o[-2:]
+
         hiddens = o[5:-2]
         assert len(mu) > 2
         mu = mu[:-1]
@@ -888,10 +902,10 @@ def loop(itr, extra):
         total_count += len(inp_mb_sub)
         total_loss = total_loss + l.cpu().data[0] * len(inp_mb_sub)
 
-        att_k_init = Variable(att_k[-1].cpu().data)
-        att_gru_init = Variable(hiddens[0][-1].cpu().data)
-        dec_gru1_init = Variable(hiddens[1][-1].cpu().data)
-        dec_gru2_init = Variable(hiddens[2][-1].cpu().data)
+        att_k_init = Variable(th.FloatTensor(att_k[-1].cpu().data.numpy().copy()))
+        att_gru_init = Variable(th.FloatTensor(hiddens[0][-1].cpu().data.numpy().copy()))
+        dec_gru1_init = Variable(th.FloatTensor(hiddens[1][-1].cpu().data.numpy().copy()))
+        dec_gru2_init = Variable(th.FloatTensor(hiddens[2][-1].cpu().data.numpy().copy()))
     return [total_loss / float(total_count)]
 
 
