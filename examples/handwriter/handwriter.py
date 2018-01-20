@@ -182,16 +182,30 @@ class GaussianAttentionCell(nn.Module):
         a_t = a_t[:, :, None]
         b_t = b_t[:, :, None]
         k_t = k_t[:, :, None]
+
+        # go from minibatch_size, n_att_components, 1 to ms, nac, c_inp_seq_len
         k_t = k_t.expand(k_t.size(0), k_t.size(1), u_c.size(2))
+        # go from c_inp_seq_len to ms, nax, c_inp_seq_len
         u_c = u_c.expand(k_t.size(0), k_t.size(1), u_c.size(2))
 
-        a_t = a_t.expand(a_t.size(0), a_t.size(1), u_c.size(2))
-        b_t = b_t.expand(b_t.size(0), b_t.size(1), u_c.size(2))
-
+        """
+        # quick check to be sure numpy matches th "broadcasting"
+        aaaa = np.random.randn(50, 10, 1) * 0
+        bbbb = np.linspace(0, 46-1, 46)
+        cccc = aaaa - bbbb
+        tttt = k_t - u_c
+        """
+        # square error term, shape ms, nax, cl
         ss1 = (k_t - u_c) ** 2
+        b_t = b_t.expand(b_t.size(0), b_t.size(1), ss1.size(2))
         ss2 = -b_t * ss1
-        ss3 = a_t * ss2.exp_()
+
+        a_t = a_t.expand(a_t.size(0), a_t.size(1), ss2.size(2))
+        ss3 = a_t * th.exp(ss2)
         ss4 = ss3.sum(dim=1)[:, 0, :]
+        # _1 = k_t ** 2 - 2 * k_t * u_c + u_c ** 2
+        # _2 = -b_t * k_t ** 2 + 2 * b_t * k_t * u_c - b_t * u_c ** 2
+        #ss4 = logsumexp(a_t + ss2, dim=1).exp_()[:, 0, :]
         return ss4
 
     def forward(self, c_inp, inp_t, gru_h_tm1, att_k_tm1, c_mask=None, inp_mask=None):
@@ -203,21 +217,56 @@ class GaussianAttentionCell(nn.Module):
         # input needs to be projected to hidden size and merge with cell...
         # otherwise this is junk
 
-        u = Variable(th.FloatTensor(th.arange(0, cts)))[None, None, :]
+        u = Variable(th.FloatTensor(np.linspace(0, cts - 1, cts)))[None, None, :]
         if get_cuda():
             u = u.cuda()
             k_tm1 = att_k_tm1.cuda()
             h_tm1 = gru_h_tm1.cuda()
 
         # c_mask here...
-        a_t = self.att_a(inp_t).exp_()
-        b_t = self.att_b(inp_t).exp_()
-        att_k_o = self.att_k(inp_t).exp_()
-        k_t = k_tm1.expand_as(att_k_o) + att_k_o
-        ss4 = self.calc_phi(k_t, a_t, b_t, u)
-        ss5 = ss4[:, :, None]
-        ss6 = ss5.expand(ss5.size(0), ss5.size(1), c_inp.size(2)) * c_inp.permute(1, 0, 2)
-        w_t = ss6.sum(dim=1)[:, 0, :]
+        # do exp inside calculation...
+        a_t = self.att_a(inp_t)
+        b_t = self.att_b(inp_t)
+        att_k_t = self.att_k(inp_t)
+
+        #a_t, b_t, att_k_t all shape (minibatch_size, n_att_components)
+
+        a_t_exp = th.exp(a_t)
+        b_t_exp = th.exp(b_t)
+        att_k_t_exp = th.exp(att_k_t)
+
+        k_t = k_tm1.expand_as(att_k_t) + att_k_t_exp
+
+        phi = self.calc_phi(k_t, a_t_exp, b_t_exp, u)
+        # shape minibatch_size, 1, c_inp_seq_len
+        phi = phi[:, None, :]
+        # minibatch_size, c_inp_seq_len, embed_dim
+        c = c_inp.permute(1, 0, 2)
+        """
+        # sanity check shapes for proper equivalent to np.dot
+        aaaa = np.random.randn(50, 1, 46)
+        bbbb = np.random.randn(50, 46, 400)
+        r = np.matmul(aaaa, bbbb)
+        # r has shape ms, 1, embed_dim
+        # since aaaa and bbbb are > 2d, treated as stack of matrices, matrix dims on last 2 axes
+        # this means 50, 1, 46 x 50, 46, 400 is 50 reps of 1, 46 x 46, 400
+        # leaving shape 50, 1, 400
+        # equivalent to dot for 1 matrix is is (aaaa[0][:, :, None] * bbbb[0][None, :, :]).sum(axis=-2)
+        # so for all 50, (aaaa[:, :, :, None] * bbbb[:, None, :, :]).sum(axis=-2)
+        # ((aaaa[:, :, :, None] * bbbb[:, None, :, :]).sum(axis=-2) == r).all()
+        _a = Variable(th.FloatTensor(aaaa))
+        _b = Variable(th.FloatTensor(bbbb))
+        e_a = _a[:, :, :, None].expand(_a.size(0), _a.size(1), _a.size(2), _b.size(2))
+        e_b = _b[:, None, :, :].expand(_b.size(0), _a.size(1), _b.size(1), _b.size(2))
+        # In [17]: np.sum(((e_a * e_b).sum(dim=-2)[:, :, 0].data.numpy() - r) ** 2)
+        # Out[17]: 1.6481219193765024e-08
+        """
+        # equivalent to comb = th.matmul(phi, c), for backwards compat
+        e_phi = phi[:, :, :, None].expand(phi.size(0), phi.size(1), phi.size(2), c.size(2))
+        e_c = c[:, None, :, :].expand(c.size(0), phi.size(1), c.size(1), c.size(2))
+        comb = (e_phi * e_c).sum(dim=-2)[:, :, 0]
+        #w_t has shape ms, embed_size
+        w_t = comb[:, 0, :]
 
         finp_t = self.inp_fork(inp_t)
         f_t = self.fork(w_t + finp_t)
@@ -323,7 +372,7 @@ class Model(nn.Module):
         # 1 * n_outs * n_components for mean
         # 1 * n_outs * n_components for var
         # 1 * n_components for membership
-        # 1 * n_components for corr - note this will be different for hidh dimensional outputs... :|
+        # 1 * n_components for corr - note this will be different for high dimensional outputs... :|
         # self.n_density = 1 + 6 * self.n_components
         self.n_density = 1 + ((1 + 1) * (n_out - 1) * n_components) + ((1 + 1) * n_components)
         self.minibatch_size = minibatch_size
@@ -850,8 +899,8 @@ TL = TrainingLoop(loop, train_itr,
                   loop, valid_itr,
                   n_epochs=n_epochs,
                   checkpoint_every_n_seconds=60 * 60 * 4,
-                  checkpoint_every_n_epochs=10,
-                  checkpoint_delay=5,
+                  checkpoint_every_n_epochs=5,
+                  checkpoint_delay=3,
                   checkpoint_dict=checkpoint_dict,
                   skip_minimums=True,
                   skip_most_recents=False)

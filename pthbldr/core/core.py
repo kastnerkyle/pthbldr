@@ -205,8 +205,6 @@ def fetch_checkpoint_dict(list_of_match_strings,
             matches = final_matches
             import_times = final_import_times
 
-            from IPython import embed; embed(); raise ValueError()
-
             while True:
                 print("Multiple matches found for %s" % (str(list_of_match_strings)))
                 for n, m in enumerate(matches):
@@ -275,6 +273,7 @@ def fetch_checkpoint_dict(list_of_match_strings,
         # assumes model dir path matches between local and remote
         # get the model dir to list on remote
         model_dir = get_pthbldr_models_dir(verbose=False)
+
         if model_dir[-1] != "/":
             model_dir += "/"
         local_hostname = socket.gethostname()
@@ -523,6 +522,9 @@ def _special_check(verbose=True):
     whitelist = ["132.204.24", "132.204.25", "132.204.26", "132.204.27"]
     subnet_match = [subnet == w for w in whitelist]
     hostname = socket.gethostname()
+    if hostname == "mila00":
+        # edge case for mila00
+        subnet_match = [True]
     if any(subnet_match):
         if verbose:
             logger.info("Found special runtime environment!")
@@ -657,7 +659,8 @@ def find_pthbldr_lookup_file(force_match=None, quick_check=False):
     cached_pkl = cached_path + to_use
     local_cache_dir = get_pthbldr_cache_dir()
     local_cache = local_cache_dir + os.sep + "%s_%s" % (cached_uuid, to_use)
-    if cached_machine == "localhost":
+    local_hostname = socket.gethostname()
+    if cached_machine == "localhost" or cached_machine == local_hostname:
         cmd_string = "rsync -vh --copy-links --progress %s %s" % (cached_pkl, local_cache)
     else:
         cmd_string = "rsync -vh --copy-links --progress %s:%s %s" % (cached_machine, cached_pkl, local_cache)

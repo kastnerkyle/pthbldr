@@ -38,7 +38,7 @@ def get_text(cond):
 text = get_text(c_mb[:, which_example].argmax(axis=-1))
 plot_lines_iamondb_example(orig_mb, title=text, save_name="tru")
 
-from IPython import embed; embed(); raise ValueError()
+#from IPython import embed; embed(); raise ValueError()
 
 checkpoint_dict, model, optimizer = fetch_checkpoint_dict(["handwriter"])
 set_cuda(True)
@@ -185,9 +185,20 @@ def sample_sequence(itr):
     log_coeff_results = np.concatenate(log_coeff_results)
     log_binary_results = np.concatenate(log_binary_results)
 
+    def plot_attention(att_k_i, save_name):
+        import matplotlib.pyplot as plt
+        plt.plot(att_k_i.mean(axis=-1))
+        plt.savefig(save_name)
+        plt.close()
+
+
+    plot_attention(att_k_results[:, which_example, :], save_name="att")
+    plot_attention(att_k_results[:, which_example, :], save_name="att2")
 
     binary_results = sigmoid(log_binary_results)
     coeff_results = softmax(log_coeff_results)
+    from IPython import embed; embed(); raise ValueError()
+
 
     mu_i = mu_results[:, which_example]
     sigma_i = sigma_results[:, which_example]
@@ -198,7 +209,7 @@ def sample_sequence(itr):
     random_state = np.random.RandomState(2177)
 
     s = numpy_sample_bernoulli_and_bivariate_gmm(mu_i, sigma_i, corr_i, coeff_i,
-                                                 binary_i, random_state, use_map=False)
+                                                 binary_i, random_state, use_map=True)
     samp_mb = s.copy()
     orig_mb = mb[:, which_example].copy()
     #samp_mb[:, 0] = orig_mb[:len(samp_mb), 0]
