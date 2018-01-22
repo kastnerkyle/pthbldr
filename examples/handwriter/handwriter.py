@@ -158,7 +158,7 @@ class GGRUCell(nn.Module):
 # TODO: Change logic to cell based... oy
 class GaussianAttentionCell(nn.Module):
     def __init__(self, c_input_size, input_size, hidden_size, n_components, minibatch_size,
-                 cell_type="GRU"):
+                 cell_type="GRU", default_step=1.):
         super(GaussianAttentionCell, self).__init__()
         self.c_input_size = c_input_size
         self.input_size = input_size
@@ -166,13 +166,14 @@ class GaussianAttentionCell(nn.Module):
         self.minibatch_size = minibatch_size
         self.cell_type = cell_type
         self.hidden_size = hidden_size
+        self.default_step = default_step
         self.att_a = GLinear(self.c_input_size, self.n_components)
         self.att_b = GLinear(self.c_input_size, self.n_components)
         self.att_k = GLinear(self.c_input_size, self.n_components)
         if cell_type == "GRU":
             #self.gru1 = nn.GRUCell(self.input_size, self.hidden_size)
             self.inp_fork = GLinear(self.input_size, self.hidden_size)
-            self.fork = GGRUFork(self.input_size, self.hidden_size)
+            self.fork = GGRUFork(2 * self.input_size, self.hidden_size)
             self.cell = GGRUCell(self.hidden_size, self.minibatch_size)
         else:
             raise ValueError("Unsupported cell_type={}".format(cell_type))
@@ -200,8 +201,8 @@ class GaussianAttentionCell(nn.Module):
         ss1 = (k_t - u_c) ** 2
         b_t = b_t.expand(b_t.size(0), b_t.size(1), ss1.size(2))
         ss2 = -b_t * ss1
-
         a_t = a_t.expand(a_t.size(0), a_t.size(1), ss2.size(2))
+
         ss3 = a_t * th.exp(ss2)
         ss4 = ss3.sum(dim=1)[:, 0, :]
         # _1 = k_t ** 2 - 2 * k_t * u_c + u_c ** 2
@@ -236,11 +237,19 @@ class GaussianAttentionCell(nn.Module):
         b_t_exp = th.exp(b_t)
         att_k_t_exp = th.exp(att_k_t)
 
-        k_t = k_tm1.expand_as(att_k_t) + att_k_t_exp
-        # clamp to only go 2x past the limit
-        #k_t = k_t.clamp(0., 2 * cts)
+        """
+        a_t_exp = F.softplus(a_t)
+        b_t_exp = F.softplus(b_t)
+        att_k_t_exp = F.softplus(att_k_t)
+        """
+
+        k_t = k_tm1.expand_as(att_k_t) + self.default_step * att_k_t_exp
+        #k_t = k_tm1.expand_as(att_k_t) + att_k_t_exp
+        # clamp to only go 10% past the limit
+        #k_t = k_t.clamp(0., 1.1 * cts)
 
         phi = self.calc_phi(k_t, a_t_exp, b_t_exp, u)
+        #phi = self.calc_phi(k_t, a_t, b_t_exp, u)
         # shape minibatch_size, 1, c_inp_seq_len
         phi = phi[:, None, :]
         # minibatch_size, c_inp_seq_len, embed_dim
@@ -272,9 +281,11 @@ class GaussianAttentionCell(nn.Module):
         w_t = comb[:, 0, :]
 
         finp_t = self.inp_fork(inp_t)
-        f_t = self.fork(w_t + finp_t)
+        f_t = self.fork(th.cat([finp_t, w_t], 1))
+        #f_t = self.fork(w_t + finp_t)
         h_t = self.cell(f_t, h_tm1, inp_mask)
-        return h_t, k_t, w_t
+        phi_t = phi[:, 0]
+        return h_t, k_t, phi_t, w_t
 
     def create_inits(self):
         if self.cell_type == "GRU":
@@ -338,12 +349,13 @@ def norm_gradient(model, rescale):
     if rescale is None:
         return
     grad_norm = None
-    for p in model.parameters():
+    for k, p in model.named_parameters():
         if p.grad is None:
             continue
         if (p.grad != p.grad).float().sum().data[0] > 0:
-            print("WARNING: NaN grad, replacing by {}".format(rescale))
-            p.grad[p.grad != p.grad] = rescale
+            r = 0.
+            print("WARNING: NaN grad, replacing by {}".format(r))
+            p.grad[p.grad != p.grad] = r
         if grad_norm is None:
             grad_norm = (p.grad.data ** 2).sum()
         else:
@@ -362,13 +374,14 @@ def norm_gradient(model, rescale):
 # MUST PASS ALL THESE IN
 class Model(nn.Module):
     def __init__(self, minibatch_size, n_in, n_hid, n_out, n_chars,
-                 n_att_components, n_components, bias=0.):
+                 n_att_components, n_components, bias=0., att_step=.01):
         super(Model, self).__init__()
         self.minibatch_size = minibatch_size
         self.n_in = n_in
         self.n_hid = n_hid
         self.n_out = n_out
         self.n_chars = n_chars
+        self.att_step = att_step
         self.n_att_components = n_att_components
         self.n_components = n_components
         # 1 for beroulli
@@ -387,7 +400,8 @@ class Model(nn.Module):
         self.lproj = GLinear(self.n_out, self.n_hid)
         self.att_l1 = GaussianAttentionCell(self.n_hid, self.n_hid, self.n_hid,
                                             self.n_att_components,
-                                            self.minibatch_size)
+                                            self.minibatch_size,
+                                            default_step=att_step)
         self.proj_to_l2 = GGRUFork(self.n_hid, self.n_hid)
         self.proj_to_l3 = GGRUFork(self.n_hid, self.n_hid)
         self.att_to_l2 = GGRUFork(self.n_hid, self.n_hid)
@@ -471,13 +485,24 @@ class Model(nn.Module):
         hiddens = [Variable(th.zeros(ts, self.minibatch_size, self.n_hid)) for i in range(3)]
         att_w = Variable(th.zeros(ts, self.minibatch_size, self.n_hid))
         att_k = Variable(th.zeros(ts, self.minibatch_size, self.n_att_components))
+        att_phi = Variable(th.zeros(ts, self.minibatch_size, len(c_inp)))
+
+        att_inits = self.att_l1.create_inits()
+        hh = att_inits[0].cpu().numpy()
+        kk = att_inits[1].cpu().numpy()
+
+        aghtm1 = th.FloatTensor(hh + att_gru_init.cpu().data.numpy())
+        aktm1 = th.FloatTensor(kk + att_k_init.cpu().data.numpy())
+        att_gru_h_tm1 = Variable(aghtm1)
+        att_k_tm1 = Variable(aktm1)
+
         if get_cuda():
             hiddens = [h.cuda() for h in hiddens]
             att_w = att_w.cuda()
             att_k = att_k.cuda()
-        att_inits = self.att_l1.create_inits()
-        att_gru_h_tm1 = Variable(att_inits[0]) + att_gru_init
-        att_k_tm1 = Variable(att_inits[1]) + att_k_init
+            att_phi = att_phi.cuda()
+            att_k_tm1 = att_k_tm1.cuda()
+            att_gru_h_tm1 = att_gru_h_tm1.cuda()
 
         for i in range(ts):
             #proj_tm1 = lproj_o[0]
@@ -486,10 +511,11 @@ class Model(nn.Module):
 
             proj_t = lproj_o[i]
             mask_t = mask_inp[i]
-            att_h_t, att_k_t, att_w_t = self.att_l1(l1_o, proj_t, att_gru_h_tm1, att_k_tm1, inp_mask=mask_t)
+            att_h_t, att_k_t, att_phi_t, att_w_t = self.att_l1(l1_o, proj_t, att_gru_h_tm1, att_k_tm1, inp_mask=mask_t)
 
             h1_t = att_h_t
             w_t = att_w_t
+            phi_t = att_phi_t
             k_t = att_k_t
             """
             if not (att_k_t.cpu().data.numpy() >= att_k_tm1.cpu().data.numpy()).all():
@@ -529,11 +555,12 @@ class Model(nn.Module):
             hiddens[2][i] = hiddens[2][i] + self.l3._slice(h3_t, 0)
             att_w[i] = att_w[i] + att_w_t
             att_k[i] = att_k[i] + att_k_t
+            att_phi[i] = att_phi[i] + att_phi_t
 
         output = self.loutp1(hiddens[0]) + self.loutp2(hiddens[1]) + self.loutp3(hiddens[2])
         poutput = self.poutp(output)
         mu, sigma, corr, log_coeff, log_binary = self._slice_outs(poutput)
-        return [mu, sigma, corr, log_coeff, log_binary] + hiddens + [att_w, att_k]
+        return [mu, sigma, corr, log_coeff, log_binary] + hiddens + [att_w, att_k, att_phi]
 
     def create_inits(self):
         l2_h = th.zeros(self.minibatch_size, self.n_hid)
@@ -835,7 +862,7 @@ def loop(itr, extra):
     att_k_init = inits[1]
     dec_gru1_init = inits[2]
     dec_gru2_init = inits[3]
-    for cut_a in safe_cuts_a:
+    for s_n, cut_a in enumerate(safe_cuts_a):
         cut_s, cut_e = cut_a
         model.zero_grad()
         cinp_mb_v = Variable(th.LongTensor(cinp_mb))
@@ -857,9 +884,9 @@ def loop(itr, extra):
                   att_gru_init, att_k_init, dec_gru1_init, dec_gru2_init)
         mu, sigma, corr, log_coeff, log_binary = o[:5]
 
-        att_w, att_k = o[-2:]
+        att_w, att_k, att_phi = o[-3:]
 
-        hiddens = o[5:-2]
+        hiddens = o[5:-3]
         assert len(mu) > 2
         mu = mu[:-1]
         sigma = sigma[:-1]
@@ -893,8 +920,11 @@ def loop(itr, extra):
             return [total_loss / float(total_count)]
 
         l = ((l_full * mask_mb_v[1:]) / mask_mb_v[1:].sum().expand_as(l_full)).sum()
+        if s_n >= len(safe_cuts_a) - 2:
+            l = 0
+            break
         if extra["train"]:
-            l.backward(retain_variables=False)
+            l.backward()
             #th.nn.utils.clip_grad_norm(net.parameters(), max_norm)
             norm_gradient(model, 10.)
             optimizer.step()

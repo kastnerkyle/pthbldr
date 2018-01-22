@@ -75,7 +75,7 @@ def softmax(X, axis=-1):
 
 
 def numpy_sample_bernoulli_and_bivariate_gmm(mu, sigma, corr, coeff, binary,
-                                             random_state, epsilon=1E-5,
+                                             random_state, binary_threshold=0.5, epsilon=1E-5,
                                              use_map=False):
     # only handles one example at a time
     # renormalize coeff to assure sums to 1...
@@ -91,7 +91,7 @@ def numpy_sample_bernoulli_and_bivariate_gmm(mu, sigma, corr, coeff, binary,
     sigma_x = sigma_i[:, 0]
     sigma_y = sigma_i[:, 1]
     if use_map:
-        s_b = binary > 0.5
+        s_b = binary > binary_threshold
         s_x = mu_x[:, None]
         s_y = mu_y[:, None]
         s = np.concatenate([s_b, s_x, s_y], axis=-1)
@@ -136,6 +136,7 @@ def sample_sequence(itr):
     log_binary_results = []
     att_w_results = []
     att_k_results = []
+    att_phi_results = []
     for cut_i in range(cuts):
         cinp_mb_v = Variable(th.LongTensor(cinp_mb))
         inp_mb_sub = inp_mb[cut_i * cut_len:(cut_i + 1) * cut_len]
@@ -155,7 +156,9 @@ def sample_sequence(itr):
         o = model(cinp_mb_v, inp_mb_v, mask_mb_v,
                   att_gru_init, att_k_init, dec_gru1_init, dec_gru2_init)
         mu, sigma, corr, log_coeff, log_binary = o[:5]
-        att_w, att_k = o[-2:]
+        att_w, att_k, att_phi = o[-3:]
+
+        hiddens = o[5:-3]
 
         mu = mu[:-1]
         sigma = sigma[:-1]
@@ -171,34 +174,70 @@ def sample_sequence(itr):
 
         att_w_results.append(att_w.cpu().data.numpy())
         att_k_results.append(att_k.cpu().data.numpy())
+        att_phi_results.append(att_phi.cpu().data.numpy())
 
-        hiddens = o[5:-2]
         att_k_init = Variable(att_k[-1].cpu().data)
         att_gru_init = Variable(hiddens[0][-1].cpu().data)
         dec_gru1_init = Variable(hiddens[1][-1].cpu().data)
         dec_gru2_init = Variable(hiddens[2][-1].cpu().data)
     att_w_results = np.concatenate(att_w_results)
     att_k_results = np.concatenate(att_k_results)
+    att_phi_results = np.concatenate(att_phi_results)
     mu_results = np.concatenate(mu_results)
     sigma_results = np.concatenate(sigma_results)
     corr_results = np.concatenate(corr_results)
     log_coeff_results = np.concatenate(log_coeff_results)
     log_binary_results = np.concatenate(log_binary_results)
 
-    def plot_attention(att_k_i, save_name):
+    def plot_attention_line(att_k_i, save_name):
+        # att_k_i is shape (output_timesteps, n_att_components)
         import matplotlib.pyplot as plt
+        plt.figure()
         plt.plot(att_k_i.mean(axis=-1))
+        plt.ylabel("input steps")
+        plt.xlabel("output steps")
         plt.savefig(save_name)
         plt.close()
 
+    def plot_attention_heatmap(att_phi_i, save_name):
+        # att_phi_i is shape (output_timesteps, input_timesteps)
+        import matplotlib.pyplot as plt
 
-    plot_attention(att_k_results[:, which_example, :], save_name="att")
-    plot_attention(att_k_results[:, which_example, :], save_name="att2")
+        plt.figure()
+        att_phi_i = att_phi_i.T
+        plt.matshow(att_phi_i)
+        x1 = att_phi_i.shape[0]
+        y1 = att_phi_i.shape[1]
+
+        def autoaspect(x_range, y_range):
+            """
+            The aspect to make a plot square with ax.set_aspect in Matplotlib
+            """
+            mx = max(x_range, y_range)
+            mn = min(x_range, y_range)
+            if x_range <= y_range:
+                return mx / float(mn)
+            else:
+                return mn / float(mx)
+
+        ax = plt.gca()
+        asp = autoaspect(x1, y1)
+        ax.set_aspect(asp)
+        ax.invert_yaxis()
+        plt.xticks([])
+        plt.yticks([])
+        plt.ylabel("input steps")
+        plt.xlabel("output steps")
+        f = plt.gcf()
+        f.set_size_inches(10.5, 10.5)
+        plt.savefig(save_name, dpi=100)
+        plt.close()
+
+    plot_attention_line(att_k_results[:, which_example, :], save_name="att")
+    plot_attention_heatmap(att_phi_results[:, which_example, :], save_name="heat_att")
 
     binary_results = sigmoid(log_binary_results)
     coeff_results = softmax(log_coeff_results)
-    from IPython import embed; embed(); raise ValueError()
-
 
     mu_i = mu_results[:, which_example]
     sigma_i = sigma_results[:, which_example]
@@ -208,11 +247,16 @@ def sample_sequence(itr):
 
     random_state = np.random.RandomState(2177)
 
+    """
     s = numpy_sample_bernoulli_and_bivariate_gmm(mu_i, sigma_i, corr_i, coeff_i,
-                                                 binary_i, random_state, use_map=True)
+                                                 binary_i, random_state, binary_threshold=0.0, use_map=False)
+    """
+
+    s = numpy_sample_bernoulli_and_bivariate_gmm(mu_i, sigma_i, corr_i, coeff_i,
+                                                 binary_i, random_state, use_map=False)
     samp_mb = s.copy()
     orig_mb = mb[:, which_example].copy()
-    #samp_mb[:, 0] = orig_mb[:len(samp_mb), 0]
+    samp_mb[:, 0] = orig_mb[:len(samp_mb), 0]
 
     def get_text(cond):
         inv_map = {v: k for k, v in iamondb['vocabulary'].items()}
