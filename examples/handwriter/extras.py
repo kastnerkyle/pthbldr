@@ -18,43 +18,6 @@ from functools import wraps
 import exceptions
 from pthbldr import pe
 
-import matplotlib
-matplotlib.use("Agg")
-
-def plot_lines_iamondb_example(X, title="", save_name=None):
-    import matplotlib.pyplot as plt
-    plt.figure()
-    f, ax = plt.subplots()
-    x = np.cumsum(X[:, 1])
-    y = np.cumsum(X[:, 2])
-
-    size_x = x.max() - x.min()
-    size_y = y.max() - y.min()
-
-    f.set_size_inches(5 * size_x / size_y, 5)
-    cuts = np.where(X[:, 0] == 1)[0]
-    if len(cuts) == 0:
-        cuts = [len(X)]
-    start = 0
-    print("here")
-    from IPython import embed; embed(); raise ValueError()
-
-    for cut_value in cuts:
-        ax.plot(x[start:cut_value], y[start:cut_value],
-                'k-', linewidth=1.5)
-        start = cut_value + 1
-    ax.axis('equal')
-    ax.axes.get_xaxis().set_visible(False)
-    ax.axes.get_yaxis().set_visible(False)
-    ax.set_title(title)
-    plt.gca().invert_xaxis()
-    plt.gca().invert_yaxis()
-
-    if save_name is None:
-        plt.show()
-    else:
-        plt.savefig(save_name, bbox_inches='tight', pad_inches=0)
-
 
 class base_iterator(object):
     def __init__(self, list_of_containers, minibatch_size,

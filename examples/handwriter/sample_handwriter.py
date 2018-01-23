@@ -6,7 +6,62 @@ floatX = "float32"
 import copy
 from pthbldr import fetch_checkpoint_dict
 from pthbldr import get_cuda, set_cuda
-from extras import fetch_iamondb, list_iterator, rsync_fetch, plot_lines_iamondb_example
+from extras import fetch_iamondb, list_iterator, rsync_fetch
+
+import matplotlib
+matplotlib.use("Agg")
+
+def plot_lines_iamondb_example(X, title="", save_name=None, detrend=True):
+    import matplotlib.pyplot as plt
+    plt.figure()
+    f, ax = plt.subplots()
+    x = np.cumsum(X[:, 1])
+    y = np.cumsum(X[:, 2])
+
+    size_x = x.max() - x.min()
+    size_y = y.max() - y.min()
+
+    f.set_size_inches(5 * size_x / size_y, 5)
+    cuts = np.where(X[:, 0] == 1)[0]
+    if len(cuts) == 0:
+        cuts = [len(X)]
+    start = 0
+
+    # https://stackoverflow.com/questions/11479064/multiple-linear-regression-in-python
+    xf = x.T
+    xf = np.c_[xf, np.ones(xf.shape[0])] # add bias term
+    yf = y
+    detrend_coeffs = np.linalg.pinv(xf.T.dot(xf)).dot(xf.T).dot(y)
+    y_detrend = y - xf.dot(detrend_coeffs)
+
+    for cut_value in cuts:
+        if detrend:
+            ax.plot(x[start:cut_value], y_detrend[start:cut_value],
+                    'k-', linewidth=1.5)
+        else:
+            ax.plot(x[start:cut_value], y[start:cut_value],
+                    'k-', linewidth=1.5)
+        start = cut_value + 1
+    ax.axis('equal')
+    #ax.axis('tight')
+
+    ax.axes.get_xaxis().set_visible(False)
+    ax.axes.get_yaxis().set_visible(False)
+
+    ax.set_title(title)
+    if not detrend:
+        plt.xlim([x.min(), x.max()])
+        plt.ylim([y.min(), y.max()])
+        plt.gca().invert_xaxis()
+        plt.gca().invert_yaxis()
+    else:
+        plt.xlim([x.min(), x.max()])
+        plt.ylim([y_detrend.min(), y_detrend.max()])
+
+    if save_name is None:
+        plt.show()
+    else:
+        plt.savefig(save_name, bbox_inches='tight', pad_inches=0)
 
 iamondb = rsync_fetch(fetch_iamondb, "leto01")
 
@@ -41,6 +96,7 @@ plot_lines_iamondb_example(orig_mb, title=text, save_name="tru")
 #from IPython import embed; embed(); raise ValueError()
 
 checkpoint_dict, model, optimizer = fetch_checkpoint_dict(["handwriter"])
+
 set_cuda(True)
 loss_function = BernoulliAndBivariateGMM()
 
