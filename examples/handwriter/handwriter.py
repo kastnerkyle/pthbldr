@@ -1,6 +1,3 @@
-# Special thanks to Kyle McDonald, this is based on his example
-# https://gist.github.com/kylemcdonald/2d06dc736789f0b329e11d504e8dee9f
-# Thanks to Laurent Dinh for examples of parameter saving/loading in PyTorch
 from torch.autograd import Variable
 import torch.nn as nn
 import torch as th
@@ -32,7 +29,7 @@ chars = np.array([yy.astype(floatX) for yy in y])
 set_cuda(True)
 
 minibatch_size = 50
-n_epochs = 100  # Used way at the bottom in the training loop!
+n_epochs = 30  # Used way at the bottom in the training loop!
 cut_len = 300  # Used way at the bottom in the training loop!
 learning_rate = 1E-4
 random_state = np.random.RandomState(1999)
@@ -89,11 +86,17 @@ def torch_summarize(model, show_weights=True, show_parameters=True):
     return tmpstr
 
 class GLinear(nn.Module):
-    def __init__(self, input_size, output_size):
+    def __init__(self, input_size, output_size, random_state=None):
         super(GLinear, self).__init__()
+        if random_state is None:
+            raise ValueError()
         self.input_size = input_size
         self.output_size = output_size
         self.linear = nn.Linear(input_size, output_size)
+        # linear stores it "backwards"...
+        self.linear.weight.data = th_normal((output_size, input_size),
+                                             random_state=random_state)
+        self.linear.bias.data.zero_()
 
     def forward(self, x):
         x_orig = x
@@ -102,18 +105,26 @@ class GLinear(nn.Module):
         l_o = self.linear(x)
         return l_o.view(*list(x_orig.size())[:-1] + [self.output_size])
 
-# need to write this...
-def th_normal(shp, scale=0.01):
-    if scale >= 1 or scale <= 0:
-        print("WARNING: excessive scale {} detected! Function should be called as th_normal((shp0, shp1)), notice parenthesis!")
-    return scale * th.randn(*shp)
+
+def th_normal(shp, scale=0.08, random_state=None):
+    if random_state is None:
+        raise ValueError("Must pass np.random.RandomState(seed_integer) object!")
+    if scale > 1 or scale <= 0:
+        print("WARNING: excessive scale {} detected! Function should be called as th_normal((shp0, shp1), random_state=random_state), notice parenthesis!")
+
+    return th.FloatTensor(scale * random_state.randn(*shp))
+
+
+def th_zeros(shp):
+    return th.FloatTensor(0. * np.zeros(shp))
 
 
 class GGRUFork(nn.Module):
-     def __init__(self, input_size, hidden_size):
+     def __init__(self, input_size, hidden_size, random_state):
          super(GGRUFork, self).__init__()
-         self.W = nn.Parameter(th_normal((input_size, 3 * hidden_size)))
-         self.b = nn.Parameter(th_normal((3 * hidden_size,)))
+         self.W = nn.Parameter(th_normal((input_size, 3 * hidden_size),
+                                         random_state=random_state))
+         self.b = nn.Parameter(th_zeros((3 * hidden_size,)))
          self.input_size = input_size
          self.hidden_size = hidden_size
 
@@ -124,10 +135,12 @@ class GGRUFork(nn.Module):
 
 class GGRUCell(nn.Module):
     # https://discuss.pytorch.org/t/how-to-define-a-new-layer-with-autograd/351
-    def __init__(self, hidden_size, minibatch_size):
+    def __init__(self, hidden_size, minibatch_size, random_state):
         super(GGRUCell, self).__init__()
-        self.Wur = nn.Parameter(th_normal((hidden_size, 2 * hidden_size)))
-        self.U = nn.Parameter(th_normal((hidden_size, hidden_size)))
+        self.Wur = nn.Parameter(th_normal((hidden_size, 2 * hidden_size),
+                                           random_state=random_state))
+        self.U = nn.Parameter(th_normal((hidden_size, hidden_size),
+                                         random_state=random_state))
         self.hidden_size = hidden_size
         self.minibatch_size = minibatch_size
 
@@ -158,8 +171,10 @@ class GGRUCell(nn.Module):
 # TODO: Change logic to cell based... oy
 class GaussianAttentionCell(nn.Module):
     def __init__(self, c_input_size, input_size, hidden_size, n_components, minibatch_size,
-                 cell_type="GRU", default_step=1.):
+                 cell_type="GRU", default_step=1., random_state=None):
         super(GaussianAttentionCell, self).__init__()
+        if random_state is None:
+            raise ValueError("Must pass random_state!")
         self.c_input_size = c_input_size
         self.input_size = input_size
         self.n_components = n_components
@@ -167,27 +182,27 @@ class GaussianAttentionCell(nn.Module):
         self.cell_type = cell_type
         self.hidden_size = hidden_size
         self.default_step = default_step
-        self.att_a = GLinear(self.c_input_size, self.n_components)
-        self.att_b = GLinear(self.c_input_size, self.n_components)
-        self.att_k = GLinear(self.c_input_size, self.n_components)
+        self.att_a = GLinear(self.c_input_size, self.n_components, random_state=random_state)
+        self.att_b = GLinear(self.c_input_size, self.n_components, random_state=random_state)
+        self.att_k = GLinear(self.c_input_size, self.n_components, random_state=random_state)
         if cell_type == "GRU":
-            #self.gru1 = nn.GRUCell(self.input_size, self.hidden_size)
-            self.inp_fork = GLinear(self.input_size, self.hidden_size)
-            self.fork = GGRUFork(2 * self.input_size, self.hidden_size)
-            self.cell = GGRUCell(self.hidden_size, self.minibatch_size)
+            self.inp_fork = GLinear(self.input_size, self.hidden_size, random_state=random_state)
+            self.fork = GGRUFork(2 * self.input_size, self.hidden_size, random_state=random_state)
+            self.cell = GGRUCell(self.hidden_size, self.minibatch_size, random_state=random_state)
         else:
             raise ValueError("Unsupported cell_type={}".format(cell_type))
 
     # 3D at every timestep
     def calc_phi(self, k_t, a_t, b_t, u_c):
+        # add training 1 dim
         a_t = a_t[:, :, None]
         b_t = b_t[:, :, None]
         k_t = k_t[:, :, None]
 
-        # go from minibatch_size, n_att_components, 1 to ms, nac, c_inp_seq_len
+        # go from minibatch_size, n_att_components, 1 to minibatch_size, n_att_components, c_inp_seq_len
         k_t = k_t.expand(k_t.size(0), k_t.size(1), u_c.size(2))
 
-        # go from c_inp_seq_len to ms, nax, c_inp_seq_len
+        # go from c_inp_seq_len to minibatch_size, n_att_components, c_inp_seq_len
         u_c = u_c.expand(k_t.size(0), k_t.size(1), u_c.size(2))
 
         """
@@ -197,17 +212,15 @@ class GaussianAttentionCell(nn.Module):
         cccc = aaaa - bbbb
         tttt = k_t - u_c
         """
-        # square error term, shape ms, nax, cl
+        # square error term, shape minibatch_size, n_att_components, c_inp_seq_len
         ss1 = (k_t - u_c) ** 2
         b_t = b_t.expand(b_t.size(0), b_t.size(1), ss1.size(2))
         ss2 = -b_t * ss1
         a_t = a_t.expand(a_t.size(0), a_t.size(1), ss2.size(2))
 
+        # still minibatch_size, n_att_components, c_inp_seq_len
         ss3 = a_t * th.exp(ss2)
-        ss4 = ss3.sum(dim=1)[:, 0, :]
-        # _1 = k_t ** 2 - 2 * k_t * u_c + u_c ** 2
-        # _2 = -b_t * k_t ** 2 + 2 * b_t * k_t * u_c - b_t * u_c ** 2
-        #ss4 = logsumexp(a_t + ss2, dim=1).exp_()[:, 0, :]
+        ss4 = ss3.sum(dim=1)
         return ss4
 
     def forward(self, c_inp, inp_t, gru_h_tm1, att_k_tm1, c_mask=None, inp_mask=None):
@@ -225,33 +238,19 @@ class GaussianAttentionCell(nn.Module):
             k_tm1 = att_k_tm1.cuda()
             h_tm1 = gru_h_tm1.cuda()
 
-        # c_mask here...
-        # do exp inside calculation...
+        # c_mask here?
         a_t = self.att_a(inp_t)
         b_t = self.att_b(inp_t)
         att_k_t = self.att_k(inp_t)
 
         #a_t, b_t, att_k_t all shape (minibatch_size, n_att_components)
-
         a_t_exp = th.exp(a_t)
         b_t_exp = th.exp(b_t)
         att_k_t_exp = th.exp(att_k_t)
-
-        """
-        a_t_exp = F.softplus(a_t)
-        b_t_exp = F.softplus(b_t)
-        att_k_t_exp = F.softplus(att_k_t)
-        """
-
         k_t = k_tm1.expand_as(att_k_t) + self.default_step * att_k_t_exp
-        #k_t = k_tm1.expand_as(att_k_t) + att_k_t_exp
-        # clamp to only go 10% past the limit
-        #k_t = k_t.clamp(0., 1.1 * cts)
 
+        # phi has shape minibatch_size, 1, c_inp_seq_len
         phi = self.calc_phi(k_t, a_t_exp, b_t_exp, u)
-        #phi = self.calc_phi(k_t, a_t, b_t_exp, u)
-        # shape minibatch_size, 1, c_inp_seq_len
-        phi = phi[:, None, :]
         # minibatch_size, c_inp_seq_len, embed_dim
         c = c_inp.permute(1, 0, 2)
         """
@@ -277,13 +276,14 @@ class GaussianAttentionCell(nn.Module):
         e_phi = phi[:, :, :, None].expand(phi.size(0), phi.size(1), phi.size(2), c.size(2))
         e_c = c[:, None, :, :].expand(c.size(0), phi.size(1), c.size(1), c.size(2))
         comb = (e_phi * e_c).sum(dim=-2)[:, :, 0]
-        #w_t has shape ms, embed_size
+        # comb has shape minibatch_size, 1, embed_size
+        # w_t has shape minibatch_size, embed_size
         w_t = comb[:, 0, :]
 
         finp_t = self.inp_fork(inp_t)
         f_t = self.fork(th.cat([finp_t, w_t], 1))
-        #f_t = self.fork(w_t + finp_t)
         h_t = self.cell(f_t, h_tm1, inp_mask)
+        # slice out the empty 1 dim, leaving shape minibatch_size, c_inp_seq_len
         phi_t = phi[:, 0]
         return h_t, k_t, phi_t, w_t
 
@@ -296,22 +296,8 @@ class GaussianAttentionCell(nn.Module):
             k_i = k_i.cuda()
         return [h_i, k_i]
 
-def log_softmax(inp, axis=-1):
-    # https://discuss.pytorch.org/t/why-softmax-function-cant-specify-the-dimension-to-operate/2637
-    input_size = inp.size()
 
-    trans_input = inp.transpose(axis, len(input_size)-1)
-    trans_size = trans_input.size()
-
-    input_2d = trans_input.contiguous().view(-1, trans_size[-1])
-
-    log_softmax_2d = F.log_softmax(input_2d)
-
-    log_softmax_nd = log_softmax_2d.view(*trans_size)
-    tt = log_softmax_nd.transpose(axis, len(input_size)-1)
-    return tt
-
-def softmax(inp, eps=1E-6, axis=-1):
+def log_softmax(inp, eps=1E-6, axis=-1):
     # https://discuss.pytorch.org/t/why-softmax-function-cant-specify-the-dimension-to-operate/2637
     if axis != -1:
         raise ValueError("NYI")
@@ -322,14 +308,20 @@ def softmax(inp, eps=1E-6, axis=-1):
 
     input_2d = trans_input.contiguous().view(-1, trans_size[-1])
 
-    ee = th.exp(input_2d - th.max(input_2d).expand_as(input_2d))
-    softmax_2d = ee / (th.sum(ee, dim=-1).expand_as(ee) + eps)
-    #softmax_2d = F.softmax(input_2d)
-    #esoftmax_2d = softmax_2d
-    #softmax_2d = esoftmax_2d / esoftmax_2d.sum(dim=-1).expand_as(esoftmax_2d) + eps
+    # backwards compat ... https://github.com/pytorch/pytorch/issues/1546
+    def _log_softmax(input_):
+        max_vals, max_pos = th.max(input_, 1)
+        input_ = input_ - max_vals.expand_as(input_)
+        input_exp = th.exp(input_)
+        norm_vals = input_exp.sum(1)
+        norm_vals = th.log(norm_vals)
+        # subtract sum
+        input_ = input_ - norm_vals.expand_as(input_)
+        return input_
 
-    softmax_nd = softmax_2d.view(*trans_size)
-    tt = softmax_nd.transpose(axis, len(input_size)-1)
+    log_softmax_2d = _log_softmax(input_2d)
+    log_softmax_nd = log_softmax_2d.view(*trans_size)
+    tt = log_softmax_nd.transpose(axis, len(input_size) - 1)
     return tt
 
 
@@ -371,10 +363,58 @@ def norm_gradient(model, rescale):
         p.grad.data = scaling * p.grad.data
 
 
+# from A d B
+# https://github.com/adbrebs/handwriting/blob/master/model.py
+def logsumexp(inputs, dim=None):
+    max_i = inputs.max(dim=dim)[0]
+    z = th.log(th.sum(th.exp(inputs - max_i.expand_as(inputs)), dim=dim)) + max_i
+    return z
+
+
+# https://discuss.pytorch.org/t/build-your-own-loss-function-in-pytorch/235/18
+class BernoulliAndBivariateGMM(nn.Module):
+    def __init__(self):
+        super(BernoulliAndBivariateGMM, self).__init__()
+
+    def forward(self, true, mu, sigma, corr, lin_coeff, lin_binary):
+        # true is L, B, 3
+        # mu is output of linear
+        # sigma is output of softplus / exp
+        # corr is output of tanh
+        # coeff is output of softmax
+        # binary is output of linear (logit)
+        mu1 = mu[:, :, 0, :]
+        mu2 = mu[:, :, 1, :]
+        sigma1 = sigma[:, :, 0, :]
+        sigma2 = sigma[:, :, 1, :]
+        t0 = true[:, :, 0][:, :, None]
+        t1 = true[:, :, 1][:, :, None].expand_as(mu1)
+        t2 = true[:, :, 2][:, :, None].expand_as(mu2)
+
+        eps = 1E-3
+
+        log_coeff = log_softmax(lin_coeff, eps=eps)
+
+        a, t = lin_binary, t0
+        c_b = -1. * th.sum(t * F.softplus(-a) + (1. - t) * F.softplus(a), dim=2)
+
+        pi = 3.14159
+        buff = 1. - corr ** 2 + eps
+        std_x = (t1 - mu1) / sigma1
+        std_y = (t2 - mu2) / sigma2
+
+        z = std_x ** 2 + std_y ** 2 - 2. * corr * std_x * std_y
+
+        log_gprob = - z / (2. * buff) - 0.5 * th.log(buff) - th.log(sigma1) - th.log(sigma2) - np.log(2. * pi)
+        nll = -logsumexp(log_coeff + log_gprob, dim=2) - c_b
+        return nll
+
+
 # MUST PASS ALL THESE IN
 class Model(nn.Module):
     def __init__(self, minibatch_size, n_in, n_hid, n_out, n_chars,
-                 n_att_components, n_components, bias=0., att_step=.01):
+                 n_att_components, n_components, bias=0., att_step=.01,
+                 random_seed=2177):
         super(Model, self).__init__()
         self.minibatch_size = minibatch_size
         self.n_in = n_in
@@ -384,6 +424,7 @@ class Model(nn.Module):
         self.att_step = att_step
         self.n_att_components = n_att_components
         self.n_components = n_components
+        self.random_state = np.random.RandomState(random_seed)
         # 1 for beroulli
         # 1 * n_outs * n_components for mean
         # 1 * n_outs * n_components for var
@@ -395,32 +436,40 @@ class Model(nn.Module):
         self.bias_coeff = bias
         self.bias_sigma = bias
 
+        # random state or at least control seeding...
         self.linp = nn.Embedding(self.n_chars, self.n_hid)
+        self.linp.weight.data = th_normal((self.n_chars, self.n_hid),
+                                           scale=1.0,
+                                           random_state=random_state)
         # n_in is the number of chars, n_out is 3 (pen, X, y)
-        self.lproj = GLinear(self.n_out, self.n_hid)
+        self.lproj = GLinear(self.n_out, self.n_hid, random_state=self.random_state)
         self.att_l1 = GaussianAttentionCell(self.n_hid, self.n_hid, self.n_hid,
                                             self.n_att_components,
                                             self.minibatch_size,
-                                            default_step=att_step)
-        self.proj_to_l2 = GGRUFork(self.n_hid, self.n_hid)
-        self.proj_to_l3 = GGRUFork(self.n_hid, self.n_hid)
-        self.att_to_l2 = GGRUFork(self.n_hid, self.n_hid)
-        self.att_to_l3 = GGRUFork(self.n_hid, self.n_hid)
-        self.l1_to_l2 = GGRUFork(self.n_hid, self.n_hid)
-        self.l1_to_l3 = GGRUFork(self.n_hid, self.n_hid)
-        self.l2_to_l3 = GGRUFork(self.n_hid, self.n_hid)
-        self.l2 = GGRUCell(self.n_hid, self.minibatch_size)
-        self.l3 = GGRUCell(self.n_hid, self.minibatch_size)
-        self.loutp1 = GLinear(self.n_hid, self.n_density)
-        self.loutp2 = GLinear(self.n_hid, self.n_density)
-        self.loutp3 = GLinear(self.n_hid, self.n_density)
-        self.poutp = GLinear(self.n_density, self.n_density)
+                                            default_step=att_step,
+                                            random_state=self.random_state)
+        self.proj_to_l2 = GGRUFork(self.n_hid, self.n_hid, random_state=self.random_state)
+        self.proj_to_l3 = GGRUFork(self.n_hid, self.n_hid, random_state=self.random_state)
+        self.att_to_l2 = GGRUFork(self.n_hid, self.n_hid, random_state=self.random_state)
+        self.att_to_l3 = GGRUFork(self.n_hid, self.n_hid, random_state=self.random_state)
+        self.l1_to_l2 = GGRUFork(self.n_hid, self.n_hid, random_state=self.random_state)
+        self.l1_to_l3 = GGRUFork(self.n_hid, self.n_hid, random_state=self.random_state)
+        self.l2_to_l3 = GGRUFork(self.n_hid, self.n_hid, random_state=self.random_state)
+        self.l2 = GGRUCell(self.n_hid, self.minibatch_size, random_state=self.random_state)
+        self.l3 = GGRUCell(self.n_hid, self.minibatch_size, random_state=self.random_state)
+        self.loutp1 = GLinear(self.n_hid, self.n_density, random_state=self.random_state)
+        self.loutp2 = GLinear(self.n_hid, self.n_density, random_state=self.random_state)
+        self.loutp3 = GLinear(self.n_hid, self.n_density, random_state=self.random_state)
+        self.poutp = GLinear(self.n_density, self.n_density, random_state=self.random_state)
+
         for m in self.modules():
+            # Handle in respective classes
+            pass
+            """
             if isinstance(m, GLinear):
                 sz = m.linear.weight.size()
                 m.linear.weight.data = th_normal((sz[0], sz[1]))
                 m.linear.bias.data.zero_()
-            """
             if isinstance(m, nn.Conv2d):
                 n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
                 m.weight.data.normal_(0, math.sqrt(2. / n))
@@ -444,43 +493,19 @@ class Model(nn.Module):
         mu = outs[..., 0:2*k]
         sigma = outs[..., 2*k:4*k]
         corr = outs[..., 4*k:5*k]
-        log_coeff = outs[..., 5*k:6*k]
-        log_binary = outs[..., 6*k:]
+        lin_coeff = outs[..., 5*k:6*k]
+        lin_binary = outs[..., 6*k:]
         corr = th.tanh(corr)
-        #binary = th.sigmoid(binary)
-        #binary = (binary + eps) * (1. - 2 * eps)
-        sigma = th.exp(sigma - self.bias_sigma) + 1E-4
-        #log_coeff = log_softmax(log_coeff)
-        #coeff = softmax(coeff * (1. + self.bias_coeff))
+        sigma = F.softplus(sigma - self.bias_sigma) + 1E-4
         mu = mu.contiguous().view(mu.size()[:-1] + (2, self.n_components))
         sigma = sigma.contiguous().view(sigma.size()[:-1] + (2, self.n_components))
-        return mu, sigma, corr, log_coeff, log_binary
-        """
-        #binary = th.sigmoid(binary)
-        #sigma = th.exp(sigma.clamp(-3., 3.) - self.bias_sigma).clamp(1E-3, 10.)
-        #sigma = F.softplus(sigma - self.bias_sigma) + 1E-4
-        #sigma = th.exp(sigma.clamp(-10., 3.)) + 1E-4
-        sigma = th.exp(sigma.clamp(-10., 10.) - self.bias_sigma).clamp(1E-3, 10.)
-        #) constant offset of 1 to set starting corr to 0?
-        # scale it
-        corr = th.tanh(corr)
-        log_coeff = F.log_softmax(lcoeff)
-        #coeff = softmax(coeff * (1. + self.bias_coeff))
-        mu = mu.contiguous().view(mu.size()[:-1] + (2, self.n_components))
-        sigma = sigma.contiguous().view(sigma.size()[:-1] + (2, self.n_components))
-        return mu, sigma, corr, coeff, binary
-        """
+        return mu, sigma, corr, lin_coeff, lin_binary
 
     def forward(self, c_inp, inp, mask_inp,
                 att_gru_init, att_k_init, dec_gru1_init, dec_gru2_init):
         lproj_o = self.lproj(inp)
         l1_o = self.linp(c_inp)
-        #lproj_o = self.lproj(inp)
         ts = inp.size(0)
-        # inits[0] = att_gru_init
-        # inits[1] = att_k_init
-        # inits[2] = dec_gru1_init
-        # inits[3] = dec_gru2_init
 
         hiddens = [Variable(th.zeros(ts, self.minibatch_size, self.n_hid)) for i in range(3)]
         att_w = Variable(th.zeros(ts, self.minibatch_size, self.n_hid))
@@ -505,29 +530,17 @@ class Model(nn.Module):
             att_gru_h_tm1 = att_gru_h_tm1.cuda()
 
         for i in range(ts):
-            #proj_tm1 = lproj_o[0]
+            proj_t = lproj_o[i]
+            mask_t = mask_inp[i]
             h2_tm1 = dec_gru1_init
             h3_tm1 = dec_gru2_init
 
-            proj_t = lproj_o[i]
-            mask_t = mask_inp[i]
             att_h_t, att_k_t, att_phi_t, att_w_t = self.att_l1(l1_o, proj_t, att_gru_h_tm1, att_k_tm1, inp_mask=mask_t)
 
             h1_t = att_h_t
             w_t = att_w_t
             phi_t = att_phi_t
             k_t = att_k_t
-            """
-            if not (att_k_t.cpu().data.numpy() >= att_k_tm1.cpu().data.numpy()).all():
-                print("not monotonic????")
-                from IPython import embed; embed(); raise ValueError()
-            """
-
-            """
-            if not (len(c_inp) + 1 > att_k_t.cpu().data.numpy()).all():
-                print("too big???")
-                from IPython import embed; embed(); raise ValueError()
-            """
 
             inp_f_l2 = self.proj_to_l2(proj_t)
             inp_f_l3 = self.proj_to_l3(proj_t)
@@ -559,8 +572,8 @@ class Model(nn.Module):
 
         output = self.loutp1(hiddens[0]) + self.loutp2(hiddens[1]) + self.loutp3(hiddens[2])
         poutput = self.poutp(output)
-        mu, sigma, corr, log_coeff, log_binary = self._slice_outs(poutput)
-        return [mu, sigma, corr, log_coeff, log_binary] + hiddens + [att_w, att_k, att_phi]
+        mu, sigma, corr, lin_coeff, lin_binary = self._slice_outs(poutput)
+        return [mu, sigma, corr, lin_coeff, lin_binary] + hiddens + [att_w, att_k, att_phi]
 
     def create_inits(self):
         l2_h = th.zeros(self.minibatch_size, self.n_hid)
@@ -570,172 +583,6 @@ class Model(nn.Module):
              l3_h = l3_h.cuda()
         return self.att_l1.create_inits() + [l2_h, l3_h]
 
-# from A d B
-# https://github.com/adbrebs/handwriting/blob/master/model.py
-def logsumexp(inputs, dim=None):
-    max_i = inputs.max(dim=dim)[0]
-    z = th.log(th.sum(th.exp(inputs - max_i.expand_as(inputs)), dim=dim)) + max_i
-    return z
-
-
-# https://discuss.pytorch.org/t/build-your-own-loss-function-in-pytorch/235/18
-class BernoulliAndBivariateGMM(nn.Module):
-    def __init__(self):
-        super(BernoulliAndBivariateGMM, self).__init__()
-
-    def forward(self, true, mu, sigma, corr, log_coeff, log_binary):
-        # true is L, B, 3
-        # mu is output of linear
-        # sigma is output of softplus / exp
-        # corr is output of tanh
-        # coeff is output of softmax
-        # binary is output of linear (logit)
-        mu1 = mu[:, :, 0, :]
-        mu2 = mu[:, :, 1, :]
-        sigma1 = sigma[:, :, 0, :]
-        sigma2 = sigma[:, :, 1, :]
-        t0 = true[:, :, 0][:, :, None]
-        t1 = true[:, :, 1][:, :, None].expand_as(mu1)
-        t2 = true[:, :, 2][:, :, None].expand_as(mu2)
-
-        eps = 1E-5
-
-        binary = th.sigmoid(log_binary)
-        binary = (binary + eps) * (1. - 2 * eps)
-        coeff = softmax(log_coeff, eps=eps)
-
-        i = th.log(binary)
-        t = t0
-        max_val = (-i).clamp(min=0)
-        nc_b = i - i * t + max_val + ((-max_val).exp() + (-i - max_val).exp()).log()
-        c_b = -nc_b
-
-        buff = 1. - corr ** 2 + eps
-        std_x = (t1 - mu1) / sigma1
-        std_y = (t2 - mu2) / sigma2
-
-        pi = 3.14159
-        z = std_x ** 2 + (std_y ** 2 - 2. * corr * std_x * std_y)
-        cost = - z / (2. * buff) - 0.5 * th.log(buff) - th.log(sigma1) - th.log(sigma2) - np.log(2. * pi)
-
-        nll = -logsumexp(th.log(coeff) + cost, dim=2) - c_b
-        return nll
-        #from IPython import embed; embed(); raise ValueError()
-
-        """
-        normalizer = 1. / (2. * 3.14159 * sigma1 * sigma2 * th.sqrt(1. - corr ** 2))
-        """
-
-        """
-        Z12 = 2 * corr * (t1 - mu1) / sigma1 * (t2 - mu2) / sigma2
-        Z12 = Z12 * 1. / (2. * (1. - corr ** 2))
-        """
-        """
-        # expansion of Z12?
-        pp1 = 2. * corr * t1 * t2
-        pp2 = -2. * corr * mu1 * t2
-        pp3 = -2. * corr * t1 * mu2
-        pp4 = 2. * corr * mu1 * mu2
-        denom = 2. * (1. - corr ** 2) / (sigma1 * sigma2)
-        Z12 = pp1 * denom + pp2 * denom + pp3 * denom + pp4 * denom
-        """
-
-        """
-        inner11 = (0.5 * th.log(1. - corr ** 2 + self.epsilon))
-        inner12 = th.log(2. * 3.14159 * sigma1) + th.log(2. * 3.14159 * sigma2) # + th.log(2. * 3.14159)
-
-        inner1 = inner11 + inner12
-
-        Z = (((t1 - mu1) / sigma1)**2) + (((t2 - mu2) / sigma2) **2)
-        p1 = 2 * corr * t1 * t2
-        p2 = -2 * corr * mu1 * t2
-        p3 = -2 * corr * t1 * mu2
-        p4 = 2 * corr * mu1 * mu2
-        denom = 1. / (sigma1 * sigma2)
-        Z -= denom * p1 + denom * p2 + denom * p3 + denom * p4
-        #Z -= (2. * (corr * (t1 - mu1) * (t2 - mu2)) / (sigma1 * sigma2))
-        inner2 = 0.5 * (1. / (1. - corr ** 2 + self.epsilon))
-        log_gprob = -(inner1 + (inner2 * Z))
-        """
-
-        """
-        # expansion of Z12?
-        pp1 = 2. * corr * t1 * t2
-        pp2 = -2. * corr * mu1 * t2
-        pp3 = -2. * corr * t1 * mu2
-        pp4 = 2. * corr * mu1 * mu2
-        denom = 1. / ((2. * (1. - corr ** 2)) * (sigma1 * sigma2))
-
-        Z12 = pp1 * denom + pp2 * denom + pp3 * denom + pp4 * denom
-
-        Z1 = ((t1 - mu1) / sigma1) ** 2
-        Z2 = ((t2 - mu2) / sigma2) ** 2
-
-        Z = Z1 + Z2 - Z12
-        log_gprob = th.log(normalizer) + Z
-        """
-        """
-        if Z.sum() < 1:
-            log_gprob = th.log(normalizer * th.exp(Z) + 1E-6)
-        else:
-            log_gprob = th.log(normalizer) + Z
-        # this should stop NaN in log_grob
-        p = th.log(normalizer) + Z
-        log_gprob = (Z > 1).float() * p
-
-        p = th.log(normalizer * th.exp(Z) + 1E-6)
-        log_gprob += (Z <= 1).float() * th.log(normalizer * th.exp(Z) + 1E-6)
-        """
-
-        #log_gprob = (Z > 1).float() * (th.log(normalizer) + Z) + (Z <= 1).float() * th.log(normalizer * th.exp(Z) + 1E-6)
-        #print("log_gprob: {}:{}".format(log_gprob.cpu().min().data[0], log_gprob.cpu().max().data[0]))
-        #fcoeff = coeff + self.epsilon
-        #fcoeff = fcoeff / fcoeff.sum(dim=2).expand_as(coeff)
-        #fgprob = th.exp(log_gprob) + self.epsilon
-        #fgprob = fgprob / fgprob.sum(dim=2).expand_as(fgprob)
-        #log_gprob = th.log(fgprob)
-        #print("post_log_gprob: {}:{}".format(log_gprob.cpu().min().data[0], log_gprob.cpu().max().data[0]))
-
-        """
-        # original
-        # naturally, this is blowing UP!
-        Z1 = (((t1 - mu1) / sigma1) ** 2) + (((t2 - mu2) / sigma2) ** 2)
-        Z = Z1 - (2. * (corr * (t1 - mu1) * (t2 - mu2)) / (sigma1 * sigma2))
-        inner2 = 0.5 * (1. / (1. - corr ** 2 + self.epsilon))
-        cost = -(inner1 + (inner2 * Z))
-        """
-
-        """
-        # Thanks to DWF https://gist.github.com/dwf/b2e1d8d575cb9e7365f302c90d909893
-        a, t = log_binary, t0
-        c_b = -1. * th.sum(t * F.softplus(-a) + (1. - t) * F.softplus(a), dim=2)
-        """
-
-        """
-        # alternate version from BCE_with_logits
-        # from F.binary_cross_entropy_with_logits
-        i = th.log(binary)
-        t = t0
-        max_val = (-i).clamp(min=0)
-        nc_b = i - i * t + max_val + ((-max_val).exp() + (-i - max_val).exp()).log()
-        c_b = -nc_b
-        """
-
-        #l_fcoeff = logsumexp(coeff, dim=2)[:, :, 0].sum()
-        #l_log_gprob = logsumexp(log_gprob, dim=2)[:, :, 0].sum()
-
-        """
-        print("Z1 {}, Z2 {}, Z12 {}".format(Z1.sum(), Z2.sum(), Z12.sum()))
-        print("log normalizer {}, Z {}".format(th.log(normalizer).sum(), Z.sum()))
-        print("normalizer {}, expZ {}".format(normalizer.sum(), th.exp(Z).sum()))
-        print("l_fcoeff {}, l_log_gprob {}, l_c_b {}".format(l_fcoeff, l_log_gprob, c_b.sum()))
-        """
-        """
-        ll1 = logsumexp(log_coeff, dim=2) + logsumexp(log_gprob, dim=2)[:, :, 0] #logsumexp(log_coeff + log_gprob, dim=2)[:, :, 0]
-        ll2 = c_b
-        nll = -ll1 - ll2
-        return nll
-        """
 
 model = Model(minibatch_size, n_in, n_hid, n_out, n_chars,
               n_att_components, n_components)
@@ -745,94 +592,14 @@ loss_function = BernoulliAndBivariateGMM()
 if get_cuda():
     model = model.cuda()
 
-"""
-min1s = []
-max1s = []
-min2s = []
-max2s = []
-try:
-    while True:
-        mb, mb_mask, c_mb, c_mb_mask = next(train_itr)
-        # normalize x, y deltas
-        fixed = []
-        for ii in range(mb.shape[1]):
-            min1 = mb[:, ii, 1].min()
-            max1 = mb[:, ii, 1].max()
-            min2 = mb[:, ii, 2].min()
-            max2 = mb[:, ii, 2].max()
-            min1s.append(min1)
-            max1s.append(max1)
-            min2s.append(min2)
-            max2s.append(max2)
-except:
-    min1s = np.array(min1s)
-    max1s = np.array(max1s)
-    min2s = np.array(min2s)
-    max2s = np.array(max2s)
-    print("min1 median {}".format(np.median(min1s)))
-    print("max1 median {}".format(np.median(max1s)))
-    print("min2 median {}".format(np.median(min2s)))
-    print("max2 median {}".format(np.median(max2s)))
-    from IPython import embed; embed(); raise ValueError()
-"""
-
 # loop *must* be after loading...
 #checkpoint_dict, model, optimizer = create_checkpoint_dict(model, optimizer,
 #    magic_reload=True, force_match="handwriter")
 checkpoint_dict, model, optimizer = create_checkpoint_dict(model, optimizer)
 print(torch_summarize(model))
 
-train_itt = 0
-train_nan_itt = []
-train_nan_chunk = []
-
-valid_itt = 0
-valid_nan_itt = []
-valid_nan_chunk = []
 def loop(itr, extra):
     mb, mb_mask, c_mb, c_mb_mask = next(itr)
-    """
-    # normalize x, y deltas
-    min1 median -4.84999990463
-    max1 median 24.25
-    min2 median -7.0
-    max2 median 16.25
-    fixed = []
-    for ii in range(mb.shape[1]):
-        min1 = -4.8499999
-        max1 = 24.25
-        min2 = -7.0
-        max2 = 16.25
-        sub = mb[:, ii]
-        sub[:, 1] = (sub[:, 1] - min1) / (max1 - min1) - 0.5
-        sub[:, 2] = (sub[:, 2] - min2) / (max2 - min2) - 0.5
-        fixed.append(sub)
-    fixed = np.array(fixed)
-    fixed = fixed.transpose(1, 0, 2)
-    mb = fixed
-    """
-
-    global train_itt
-    global train_nan_itt
-    global train_nan_chunk
-    global valid_itt
-    global valid_nan_itt
-    global valid_nan_chunk
-    if extra["train"]:
-        train_itt += 1
-
-        valid_itt = 0
-        valid_nan_itt = []
-        valid_nan_chunk = []
-    else:
-        valid_itt += 1
-        if len(train_nan_itt) > 0:
-            raise ValueError("NaN detected in training")
-
-        train_itt = 0
-        train_nan_itt = []
-        train_nan_chunk = []
-
     cinp_mb = c_mb.argmax(axis=-1).astype("int64")
     inp_mb = mb.astype(floatX)
     cuts = int(len(inp_mb) / float(cut_len)) + 1
@@ -882,7 +649,7 @@ def loop(itr, extra):
 
         o = model(cinp_mb_v, inp_mb_v, mask_mb_v,
                   att_gru_init, att_k_init, dec_gru1_init, dec_gru2_init)
-        mu, sigma, corr, log_coeff, log_binary = o[:5]
+        mu, sigma, corr, lin_coeff, lin_binary = o[:5]
 
         att_w, att_k, att_phi = o[-3:]
 
@@ -891,44 +658,16 @@ def loop(itr, extra):
         mu = mu[:-1]
         sigma = sigma[:-1]
         corr = corr[:-1]
-        log_coeff = log_coeff[:-1]
-        log_binary = log_binary[:-1]
+        lin_coeff = lin_coeff[:-1]
+        lin_binary = lin_binary[:-1]
         # target is 1:
         target = inp_mb_v[1:]
-        l_full = loss_function(target, mu, sigma, corr, log_coeff, log_binary)
-        """
-        if train_itt == 161 and cut_a == (400, 500):
-            print("The bad mama, at cut {}?".format(cut_a))
-            from IPython import embed; embed()
-        """
-        if (l_full != l_full).float().sum().data[0] > 0:
-            print("NaN detected, added to log")
-            if extra["train"]:
-                train_nan_itt.append(train_itt)
-                train_nan_chunk.append(cut_a)
-                print("train mb logged {}".format(train_nan_itt))
-                print("train chunk logged {}".format(train_nan_chunk))
-                from IPython import embed; embed();
-                raise ValueError("NaN in train")
-            else:
-                valid_nan_itt.append(valid_itt)
-                valid_nan_chunk.append(cut_a)
-                print("valid mb logged {}".format(valid_nan_itt))
-                print("valid chunk logged {}".format(valid_nan_chunk))
-            if total_count == 0:
-                total_count = 1
-            return [total_loss / float(total_count)]
-
+        l_full = loss_function(target, mu, sigma, corr, lin_coeff, lin_binary)
         l = ((l_full * mask_mb_v[1:]) / mask_mb_v[1:].sum().expand_as(l_full)).sum()
-        if s_n >= len(safe_cuts_a) - 2:
-            l = 0
-            break
         if extra["train"]:
             l.backward()
-            #th.nn.utils.clip_grad_norm(net.parameters(), max_norm)
             norm_gradient(model, 10.)
             optimizer.step()
-            #clip_gradient(model, 100.)
         total_count += len(inp_mb_sub)
         total_loss = total_loss + l.cpu().data[0] * len(inp_mb_sub)
 

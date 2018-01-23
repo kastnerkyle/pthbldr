@@ -261,7 +261,7 @@ def sample_sequence(itr):
 
         plt.figure()
         att_phi_i = att_phi_i.T
-        plt.matshow(att_phi_i)
+        plt.imshow(att_phi_i)
         x1 = att_phi_i.shape[0]
         y1 = att_phi_i.shape[1]
 
@@ -312,7 +312,9 @@ def sample_sequence(itr):
                                                  binary_i, random_state, use_map=False)
     samp_mb = s.copy()
     orig_mb = mb[:, which_example].copy()
-    samp_mb[:, 0] = orig_mb[:len(samp_mb), 0]
+    #samp_mb[:, 0] = orig_mb[:len(samp_mb), 0]
+    #samp_mb = samp_mb[:300]
+    #orig_mb = orig_mb[:300]
 
     def get_text(cond):
         inv_map = {v: k for k, v in iamondb['vocabulary'].items()}
